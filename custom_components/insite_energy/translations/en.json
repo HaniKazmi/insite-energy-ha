@@ -34,6 +34,12 @@
     "error": {
       "invalid_interval": "Interval must be a valid number of hours (>= 1)"
     }
+  },
+  "services": {
+    "refresh_data": {
+      "name": "Refresh data",
+      "description": "Forces a fetch of the latest data from Insite Energy."
+    }
   }
 }
 

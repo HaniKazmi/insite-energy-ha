@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from decimal import Decimal, InvalidOperation
 
 from .const import DOMAIN
 from .coordinator import InsiteEnergyDataUpdateCoordinator
@@ -194,6 +195,8 @@ class InsiteUtilityRateSensor(InsiteUtilityEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Rate"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = "GBP/kWh"
     _attr_icon = "mdi:cash-multiple"
 
     def __init__(self, coordinator, utility_name):
@@ -206,7 +209,12 @@ class InsiteUtilityRateSensor(InsiteUtilityEntity, SensorEntity):
         """Return the state."""
         data = self._get_utility_data()
         if data and data.get("Rates"):
-            return data["Rates"]
+            try:
+                # Use Decimal to avoid float division artifacts
+                val = Decimal(str(data["Rates"])) / Decimal(100)
+                return float(val)
+            except (ValueError, TypeError, InvalidOperation):
+                return data["Rates"]
         return None
 
 
@@ -215,6 +223,8 @@ class InsiteUtilityStandingChargeSensor(InsiteUtilityEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Standing Charge"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = "GBP/day"
     _attr_icon = "mdi:cash-clock"
 
     def __init__(self, coordinator, utility_name):
@@ -229,7 +239,12 @@ class InsiteUtilityStandingChargeSensor(InsiteUtilityEntity, SensorEntity):
         """Return the state."""
         data = self._get_utility_data()
         if data and data.get("StandingChargeValue"):
-            return data["StandingChargeValue"]
+            try:
+                # Use Decimal to avoid float division artifacts
+                val = Decimal(str(data["StandingChargeValue"])) / Decimal(100)
+                return float(val)
+            except (ValueError, TypeError, InvalidOperation):
+                return data["StandingChargeValue"]
         return None
 
 

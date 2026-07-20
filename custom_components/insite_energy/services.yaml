@@ -1,0 +1,3 @@
+refresh_data:
+  name: Refresh Data
+  description: Forces a fetch of the latest data from Insite Energy.

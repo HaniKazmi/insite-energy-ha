@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Insite Energy",
+        "description": "Enter your Insite Energy credentials.",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Account is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Insite Energy",
+        "description": "Adjust integration settings.",
+        "data": {
+          "username": "[%config.step.user.data.username%]",
+          "password": "[%config.step.user.data.password%]",
+          "update_interval": "Update Interval (hours)"
+        }
+      }
+    },
+    "error": {
+      "invalid_interval": "Interval must be a valid number of hours (>= 1)"
+    }
+  }
+}

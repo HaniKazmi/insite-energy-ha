@@ -1,5 +1,6 @@
 """Sensor platform for Insite Energy."""
 from __future__ import annotations
+import re
 
 from homeassistant.components.sensor import (
     SensorEntity,
@@ -210,8 +211,10 @@ class InsiteUtilityRateSensor(InsiteUtilityEntity, SensorEntity):
         data = self._get_utility_data()
         if data and data.get("Rates"):
             try:
+                # Strip any non-numeric characters (like 'p')
+                clean_val = re.sub(r"[^\d.]", "", str(data["Rates"]))
                 # Use Decimal to avoid float division artifacts
-                val = Decimal(str(data["Rates"])) / Decimal(100)
+                val = Decimal(clean_val) / Decimal(100)
                 return float(val)
             except (ValueError, TypeError, InvalidOperation):
                 return data["Rates"]
@@ -240,8 +243,10 @@ class InsiteUtilityStandingChargeSensor(InsiteUtilityEntity, SensorEntity):
         data = self._get_utility_data()
         if data and data.get("StandingChargeValue"):
             try:
+                # Strip any non-numeric characters (like 'p')
+                clean_val = re.sub(r"[^\d.]", "", str(data["StandingChargeValue"]))
                 # Use Decimal to avoid float division artifacts
-                val = Decimal(str(data["StandingChargeValue"])) / Decimal(100)
+                val = Decimal(clean_val) / Decimal(100)
                 return float(val)
             except (ValueError, TypeError, InvalidOperation):
                 return data["StandingChargeValue"]

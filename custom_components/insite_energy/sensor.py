@@ -1,6 +1,5 @@
 """Sensor platform for Insite Energy."""
 from __future__ import annotations
-import re
 
 from homeassistant.components.sensor import (
     SensorEntity,
@@ -8,14 +7,15 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import UnitOfEnergy, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from decimal import Decimal, InvalidOperation
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import InsiteEnergyDataUpdateCoordinator
+from .util import parse_pence, parse_reading_date, utility_key
 
 
 async def async_setup_entry(
@@ -26,27 +26,48 @@ async def async_setup_entry(
     """Set up Insite Energy sensor platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities: list[SensorEntity] = []
-
     # Account Device Sensors
-    entities.append(InsiteAccountBalanceSensor(coordinator))
-    entities.append(InsiteAccountLastPollSensor(coordinator))
+    async_add_entities(
+        [
+            InsiteAccountBalanceSensor(coordinator),
+            InsiteAccountLastPollSensor(coordinator),
+        ]
+    )
 
-    # Utility Devices Sensors
-    # NOTE: Entities are created from the initial data snapshot. If the API
-    # later returns new utilities, they won't appear until HA is restarted.
-    view_model = coordinator.data
-    if view_model and "UtilityDetails" in view_model:
-        for utility in view_model["UtilityDetails"]:
-            if "Name" in utility:
-                name = utility["Name"]
-                entities.append(InsiteUtilityReadingSensor(coordinator, name))
-                entities.append(InsiteUtilityRateSensor(coordinator, name))
-                entities.append(InsiteUtilityStandingChargeSensor(coordinator, name))
-                entities.append(InsiteUtilityReadingDateSensor(coordinator, name))
-                entities.append(InsiteUtilitySerialNumberSensor(coordinator, name))
+    # Utility Devices Sensors. At startup these are created from the cached
+    # snapshot of the previous run, so watch for utilities that only show up
+    # once the first live refresh lands.
+    known_utilities: set[str] = set()
 
-    async_add_entities(entities)
+    @callback
+    def _async_add_utilities() -> None:
+        """Add sensors for any utility we haven't seen yet."""
+        view_model = coordinator.data or {}
+        entities: list[SensorEntity] = []
+
+        for utility in view_model.get("UtilityDetails") or []:
+            name = utility.get("Name")
+            if not name:
+                continue
+            key = utility_key(utility)
+            if key in known_utilities:
+                continue
+            known_utilities.add(key)
+            entities.extend(
+                [
+                    InsiteUtilityReadingSensor(coordinator, key, name),
+                    InsiteUtilityRateSensor(coordinator, key, name),
+                    InsiteUtilityStandingChargeSensor(coordinator, key, name),
+                    InsiteUtilityReadingDateSensor(coordinator, key, name),
+                    InsiteUtilitySerialNumberSensor(coordinator, key, name),
+                ]
+            )
+
+        if entities:
+            async_add_entities(entities)
+
+    _async_add_utilities()
+    entry.async_on_unload(coordinator.async_add_listener(_async_add_utilities))
 
 
 class InsiteEnergyBaseEntity(CoordinatorEntity):
@@ -55,6 +76,9 @@ class InsiteEnergyBaseEntity(CoordinatorEntity):
     def __init__(self, coordinator: InsiteEnergyDataUpdateCoordinator) -> None:
         """Initialize the base entity."""
         super().__init__(coordinator)
+        # Keyed on the config entry rather than the email address, which the
+        # user can change in the options flow.
+        self._base_id = coordinator.config_entry.entry_id
 
 
 class InsiteAccountEntity(InsiteEnergyBaseEntity):
@@ -64,7 +88,7 @@ class InsiteAccountEntity(InsiteEnergyBaseEntity):
     def device_info(self):
         """Return device information."""
         return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.username}_account")},
+            "identifiers": {(DOMAIN, f"{self._base_id}_account")},
             "name": "Account Details",
             "manufacturer": "Insite Energy",
         }
@@ -74,14 +98,23 @@ class InsiteUtilityEntity(InsiteEnergyBaseEntity):
     """Base entity for Utility devices."""
 
     def __init__(
-        self, coordinator: InsiteEnergyDataUpdateCoordinator, utility_name: str
+        self,
+        coordinator: InsiteEnergyDataUpdateCoordinator,
+        utility_key: str,
+        utility_name: str,
     ) -> None:
         """Initialize."""
         super().__init__(coordinator)
-        self.utility_name = utility_name
-        self._safe_name = (
-            utility_name.replace(" & ", "_").replace(" ", "_").lower()
-        )
+        self.utility_key = utility_key
+        self._utility_name = utility_name
+
+    @property
+    def _display_name(self) -> str:
+        """Current name of the utility, tracking upstream renames."""
+        data = self._get_utility_data()
+        if data and data.get("Name"):
+            return str(data["Name"])
+        return self._utility_name
 
     @property
     def device_info(self):
@@ -92,19 +125,16 @@ class InsiteUtilityEntity(InsiteEnergyBaseEntity):
             serial = f" ({data.get('MeterSerialNumber')})"
 
         return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.username}_{self.utility_name}")},
-            "name": f"{self.utility_name}{serial}",
+            "identifiers": {(DOMAIN, f"{self._base_id}_{self.utility_key}")},
+            "name": f"{self._display_name}{serial}",
             "manufacturer": "Insite Energy",
             "model": "Utility Meter",
         }
 
     def _get_utility_data(self):
         """Helper to find the specific utility dict."""
-        if not self.coordinator.data or "UtilityDetails" not in self.coordinator.data:
-            return None
-
-        for utility in self.coordinator.data["UtilityDetails"]:
-            if utility.get("Name") == self.utility_name:
+        for utility in (self.coordinator.data or {}).get("UtilityDetails") or []:
+            if utility_key(utility) == self.utility_key:
                 return utility
         return None
 
@@ -124,7 +154,7 @@ class InsiteAccountBalanceSensor(InsiteAccountEntity, SensorEntity):
     def __init__(self, coordinator: InsiteEnergyDataUpdateCoordinator) -> None:
         """Initialize."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.username}_account_balance"
+        self._attr_unique_id = f"{self._base_id}_account_balance"
         self._attr_native_unit_of_measurement = "GBP"
 
     @property
@@ -152,7 +182,7 @@ class InsiteAccountLastPollSensor(InsiteAccountEntity, SensorEntity):
     def __init__(self, coordinator: InsiteEnergyDataUpdateCoordinator) -> None:
         """Initialize."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.username}_account_last_poll"
+        self._attr_unique_id = f"{self._base_id}_account_last_poll"
 
     @property
     def native_value(self):
@@ -174,10 +204,10 @@ class InsiteUtilityReadingSensor(InsiteUtilityEntity, SensorEntity):
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
 
-    def __init__(self, coordinator, utility_name):
+    def __init__(self, coordinator, utility_key, utility_name):
         """Initialize."""
-        super().__init__(coordinator, utility_name)
-        self._attr_unique_id = f"{coordinator.username}_{self._safe_name}_reading"
+        super().__init__(coordinator, utility_key, utility_name)
+        self._attr_unique_id = f"{self._base_id}_{self.utility_key}_reading"
 
     @property
     def native_value(self):
@@ -200,25 +230,18 @@ class InsiteUtilityRateSensor(InsiteUtilityEntity, SensorEntity):
     _attr_native_unit_of_measurement = "GBP/kWh"
     _attr_icon = "mdi:cash-multiple"
 
-    def __init__(self, coordinator, utility_name):
+    def __init__(self, coordinator, utility_key, utility_name):
         """Initialize."""
-        super().__init__(coordinator, utility_name)
-        self._attr_unique_id = f"{coordinator.username}_{self._safe_name}_rate"
+        super().__init__(coordinator, utility_key, utility_name)
+        self._attr_unique_id = f"{self._base_id}_{self.utility_key}_rate"
 
     @property
     def native_value(self):
         """Return the state."""
         data = self._get_utility_data()
-        if data and data.get("Rates"):
-            try:
-                # Strip any non-numeric characters (like 'p')
-                clean_val = re.sub(r"[^\d.]", "", str(data["Rates"]))
-                # Use Decimal to avoid float division artifacts
-                val = Decimal(clean_val) / Decimal(100)
-                return float(val)
-            except (ValueError, TypeError, InvalidOperation):
-                return data["Rates"]
-        return None
+        if not data:
+            return None
+        return parse_pence(data.get("Rates"))
 
 
 class InsiteUtilityStandingChargeSensor(InsiteUtilityEntity, SensorEntity):
@@ -230,27 +253,20 @@ class InsiteUtilityStandingChargeSensor(InsiteUtilityEntity, SensorEntity):
     _attr_native_unit_of_measurement = "GBP/day"
     _attr_icon = "mdi:cash-clock"
 
-    def __init__(self, coordinator, utility_name):
+    def __init__(self, coordinator, utility_key, utility_name):
         """Initialize."""
-        super().__init__(coordinator, utility_name)
+        super().__init__(coordinator, utility_key, utility_name)
         self._attr_unique_id = (
-            f"{coordinator.username}_{self._safe_name}_standing_charge"
+            f"{self._base_id}_{self.utility_key}_standing_charge"
         )
 
     @property
     def native_value(self):
         """Return the state."""
         data = self._get_utility_data()
-        if data and data.get("StandingChargeValue"):
-            try:
-                # Strip any non-numeric characters (like 'p')
-                clean_val = re.sub(r"[^\d.]", "", str(data["StandingChargeValue"]))
-                # Use Decimal to avoid float division artifacts
-                val = Decimal(clean_val) / Decimal(100)
-                return float(val)
-            except (ValueError, TypeError, InvalidOperation):
-                return data["StandingChargeValue"]
-        return None
+        if not data:
+            return None
+        return parse_pence(data.get("StandingChargeValue"))
 
 
 class InsiteUtilityReadingDateSensor(InsiteUtilityEntity, SensorEntity):
@@ -258,22 +274,25 @@ class InsiteUtilityReadingDateSensor(InsiteUtilityEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Last Reading Date"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:calendar"
 
-    def __init__(self, coordinator, utility_name):
+    def __init__(self, coordinator, utility_key, utility_name):
         """Initialize."""
-        super().__init__(coordinator, utility_name)
+        super().__init__(coordinator, utility_key, utility_name)
         self._attr_unique_id = (
-            f"{coordinator.username}_{self._safe_name}_reading_date"
+            f"{self._base_id}_{self.utility_key}_reading_date"
         )
 
     @property
     def native_value(self):
         """Return the state."""
         data = self._get_utility_data()
-        if data and data.get("MeterReadingDate"):
-            return data["MeterReadingDate"]
-        return None
+        if not data:
+            return None
+        return parse_reading_date(
+            data.get("MeterReadingDate"), dt_util.DEFAULT_TIME_ZONE
+        )
 
 
 class InsiteUtilitySerialNumberSensor(InsiteUtilityEntity, SensorEntity):
@@ -284,10 +303,10 @@ class InsiteUtilitySerialNumberSensor(InsiteUtilityEntity, SensorEntity):
     _attr_icon = "mdi:barcode"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, utility_name):
+    def __init__(self, coordinator, utility_key, utility_name):
         """Initialize."""
-        super().__init__(coordinator, utility_name)
-        self._attr_unique_id = f"{coordinator.username}_{self._safe_name}_serial"
+        super().__init__(coordinator, utility_key, utility_name)
+        self._attr_unique_id = f"{self._base_id}_{self.utility_key}_serial"
 
     @property
     def native_value(self):

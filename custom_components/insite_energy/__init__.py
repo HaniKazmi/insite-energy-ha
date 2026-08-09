@@ -1,27 +1,68 @@
 """The Insite Energy integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import CONF_USERNAME, Platform
+from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
-from .coordinator import InsiteEnergyDataUpdateCoordinator
+from .coordinator import (
+    InsiteEnergyDataUpdateCoordinator,
+    async_get_cache_store,
+)
+from .util import legacy_utility_slug, utility_key
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+# When the background startup refresh fails we would otherwise sit on stale
+# cached data until the next scheduled poll (12h by default), so retry a few
+# times first.
+INITIAL_RETRY_DELAYS = (60, 300, 900)
+
+SERVICE_REFRESH_DATA = "refresh_data"
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration-wide service."""
+
+    async def handle_refresh_data(call: ServiceCall) -> None:
+        """Refresh every configured account."""
+        for coordinator in hass.data.get(DOMAIN, {}).values():
+            await coordinator.async_request_refresh()
+
+    hass.services.async_register(DOMAIN, SERVICE_REFRESH_DATA, handle_refresh_data)
+    return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Insite Energy from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
     coordinator = InsiteEnergyDataUpdateCoordinator(hass, entry)
-    
-    # Fetch initial data so we have data when entities subscribe
-    await coordinator.async_config_entry_first_refresh()
+
+    if await coordinator.async_load_cache():
+        # Come up immediately on the previous run's data and refresh in the
+        # background, so a slow login doesn't hold up HA startup.
+        entry.async_create_background_task(
+            hass,
+            _async_startup_refresh(coordinator),
+            f"{DOMAIN} startup refresh",
+        )
+    else:
+        # Nothing cached (first run), so we have no choice but to wait.
+        await coordinator.async_config_entry_first_refresh()
+
+    await _async_migrate_identifiers(hass, entry, coordinator)
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
@@ -29,25 +70,95 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(update_listener))
 
-    async def handle_refresh_data(call: ServiceCall) -> None:
-        """Handle the service call to refresh data."""
-        await coordinator.async_request_refresh()
-
-    hass.services.async_register(DOMAIN, "refresh_data", handle_refresh_data)
-
     return True
+
+
+async def _async_migrate_identifiers(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    coordinator: InsiteEnergyDataUpdateCoordinator,
+) -> None:
+    """Move entity and device IDs off the email address.
+
+    v1 keyed everything on the account email and the utility's display name,
+    so changing the email in the options flow (or a rename upstream) orphaned
+    every entity and device. v2 uses the config entry id plus the portal's own
+    ShortName. Runs on every setup and is a no-op once migrated.
+    """
+    old_prefix = f"{entry.data[CONF_USERNAME]}_"
+    utilities = (coordinator.data or {}).get("UtilityDetails") or []
+
+    # Entity IDs used a slug of the name; device IDs used the raw name.
+    slug_to_key = {}
+    name_to_key = {}
+    for utility in utilities:
+        if name := utility.get("Name"):
+            key = utility_key(utility)
+            slug_to_key[legacy_utility_slug(str(name))] = key
+            name_to_key[str(name)] = key
+
+    def _rekey(remainder: str) -> str:
+        """Swap a legacy utility slug for its stable key, if one leads."""
+        for slug, key in slug_to_key.items():
+            if remainder.startswith(f"{slug}_"):
+                return f"{key}_{remainder[len(slug) + 1:]}"
+        return remainder
+
+    @callback
+    def _migrate_entity(reg_entry: er.RegistryEntry) -> dict[str, str] | None:
+        if not reg_entry.unique_id.startswith(old_prefix):
+            return None
+        remainder = _rekey(reg_entry.unique_id[len(old_prefix):])
+        return {"new_unique_id": f"{entry.entry_id}_{remainder}"}
+
+    await er.async_migrate_entries(hass, entry.entry_id, _migrate_entity)
+
+    device_reg = dr.async_get(hass)
+    for device in dr.async_entries_for_config_entry(device_reg, entry.entry_id):
+        new_identifiers = set()
+        changed = False
+        for domain, identifier in device.identifiers:
+            if domain == DOMAIN and identifier.startswith(old_prefix):
+                remainder = identifier[len(old_prefix):]
+                # Devices are "<email>_account" or "<email>_<raw utility name>".
+                remainder = name_to_key.get(remainder, remainder)
+                new_identifiers.add((domain, f"{entry.entry_id}_{remainder}"))
+                changed = True
+            else:
+                new_identifiers.add((domain, identifier))
+
+        if changed:
+            device_reg.async_update_device(
+                device.id, new_identifiers=new_identifiers
+            )
+
+
+async def _async_startup_refresh(
+    coordinator: InsiteEnergyDataUpdateCoordinator,
+) -> None:
+    """Refresh once HA is up, retrying briefly before the normal interval."""
+    await coordinator.async_refresh()
+
+    for delay in INITIAL_RETRY_DELAYS:
+        if coordinator.last_update_success:
+            return
+        await asyncio.sleep(delay)
+        await coordinator.async_refresh()
+
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
 
-    if not hass.data[DOMAIN]:
-        hass.services.async_remove(DOMAIN, "refresh_data")
-
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Discard the cached data when the entry is deleted."""
+    await async_get_cache_store(hass, entry.entry_id).async_remove()
+
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update."""
     await hass.config_entries.async_reload(entry.entry_id)
-

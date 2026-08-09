@@ -8,6 +8,13 @@
           "username": "Email",
           "password": "Password"
         }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Insite Energy",
+        "description": "The password for {username} is no longer working. Enter the current one.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -16,7 +23,8 @@
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Account is already configured"
+      "already_configured": "Account is already configured",
+      "reauth_successful": "Re-authentication was successful"
     }
   },
   "options": {
@@ -25,14 +33,11 @@
         "title": "Configure Insite Energy",
         "description": "Adjust integration settings.",
         "data": {
-          "username": "[%config.step.user.data.username%]",
-          "password": "[%config.step.user.data.password%]",
+          "username": "[%key:component::insite_energy::config::step::user::data::username%]",
+          "password": "Password (leave blank to keep the current one)",
           "update_interval": "Update Interval (hours)"
         }
       }
-    },
-    "error": {
-      "invalid_interval": "Interval must be a valid number of hours (>= 1)"
     }
   },
   "services": {

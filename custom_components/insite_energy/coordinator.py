@@ -42,7 +42,8 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         self.username = entry.data[CONF_USERNAME]
         # Use a dedicated session to avoid cookie cross-contamination with
         # HA's shared session. The client relies on the cookies persisting
-        # between polls to skip the slow login.
+        # between polls to skip the slow login. Created during entry setup, so
+        # HA detaches it on unload; closing it here is forbidden.
         self.session = async_create_clientsession(hass)
         self.client = InsiteClient(
             self.session, self.username, entry.data[CONF_PASSWORD]

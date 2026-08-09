@@ -234,3 +234,37 @@ def test_parse_view_model_invalid_json_raises():
     """Malformed JSON is a hard error."""
     with pytest.raises(InsiteApiError):
         _parse_view_model("var viewModel = {broken;")
+
+
+async def test_non_200_details_falls_back_to_login(session, view_model):
+    """A status error on the warm path must not wedge the client.
+
+    Only transport errors used to clear the authenticated flag, so a session
+    revoked with a 403 rather than a redirect looped forever on a request
+    that could never succeed.
+    """
+    queue_successful_login(session, view_model)
+    session.add("GET", DETAILS_URL, FakeResponse(DETAILS_URL, status=403, body=""))
+    queue_successful_login(session, view_model)
+
+    client = InsiteClient(session, "user@example.com", "pw")
+    await client.async_get_data()
+    assert await client.async_get_data() == view_model
+    assert session.requests[-3:] == [
+        ("GET", DETAILS_URL),
+        ("GET", LOGIN_URL),
+        ("POST", LOGIN_URL),
+    ]
+
+
+async def test_unparseable_details_falls_back_to_login(session, view_model):
+    """Malformed JSON on the warm path also triggers a fresh login."""
+    queue_successful_login(session, view_model)
+    session.add(
+        "GET", DETAILS_URL, FakeResponse(DETAILS_URL, body="var viewModel = {oops;")
+    )
+    queue_successful_login(session, view_model)
+
+    client = InsiteClient(session, "user@example.com", "pw")
+    await client.async_get_data()
+    assert await client.async_get_data() == view_model

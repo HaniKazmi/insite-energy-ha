@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -13,6 +15,10 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.insite_energy.api import InsiteApiError
+from custom_components.insite_energy import (
+    INITIAL_RETRY_DELAYS,
+    _async_startup_refresh,
+)
 from custom_components.insite_energy.const import CACHE_SAVE_DELAY, DOMAIN
 
 from .conftest import USERNAME
@@ -246,3 +252,80 @@ async def test_unload_entry(hass, config_entry, mock_client):
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     await hass.async_block_till_done()
     assert config_entry.entry_id not in hass.data.get(DOMAIN, {})
+
+
+async def test_migration_prefers_the_longest_matching_slug(hass, config_entry, mock_client):
+    """Overlapping utility names must not rekey against the wrong utility.
+
+    "cooling_meter_2_rate" starts with the "cooling" slug, so first-match
+    order produced "co_meter_2_rate" — an id no sensor claims, orphaning the
+    entity and losing its history.
+    """
+    mock_client.async_get_data.return_value = {
+        "CreditAccountBalance": "-47.53",
+        "UtilityDetails": [
+            {"Name": "Cooling", "ShortName": "CO", "LastMeterReading": "1"},
+            {"Name": "Cooling Meter 2", "ShortName": "C2", "LastMeterReading": "2"},
+        ],
+    }
+    config_entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "sensor", DOMAIN, f"{USERNAME}_cooling_meter_2_rate", config_entry=config_entry
+    )
+    registry.async_get_or_create(
+        "sensor", DOMAIN, f"{USERNAME}_cooling_rate", config_entry=config_entry
+    )
+
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    unique_ids = {
+        e.unique_id for e in er.async_entries_for_config_entry(registry, config_entry.entry_id)
+    }
+    assert f"{config_entry.entry_id}_c2_rate" in unique_ids
+    assert f"{config_entry.entry_id}_co_meter_2_rate" not in unique_ids
+
+
+async def test_duplicate_short_name_is_logged(hass, config_entry, mock_client, caplog):
+    """A shared ShortName drops a meter, so at least make it diagnosable."""
+    mock_client.async_get_data.return_value = {
+        "CreditAccountBalance": "-47.53",
+        "UtilityDetails": [
+            {"Name": "Heating A", "ShortName": "HH", "LastMeterReading": "1"},
+            {"Name": "Heating B", "ShortName": "HH", "LastMeterReading": "2"},
+        ],
+    }
+    await setup_entry(hass, config_entry)
+
+    assert "Heating B" in caplog.text
+    assert "shares the identifier" in caplog.text
+
+
+async def test_startup_refresh_stops_after_auth_failure():
+    """Bad credentials must not be retried; reauth is already raised."""
+    coordinator = MagicMock()
+    coordinator.async_refresh = AsyncMock()
+    coordinator.last_update_success = False
+    coordinator.last_exception = ConfigEntryAuthFailed("bad password")
+
+    # Patch sleep even though a passing run never reaches it: without it a
+    # regression would sleep out the whole 21-minute ladder instead of failing.
+    with patch("custom_components.insite_energy.asyncio.sleep", AsyncMock()) as sleep:
+        await _async_startup_refresh(coordinator)
+
+    assert coordinator.async_refresh.await_count == 1
+    sleep.assert_not_awaited()
+
+
+async def test_startup_refresh_retries_other_failures():
+    """A transient failure still gets the full retry ladder."""
+    coordinator = MagicMock()
+    coordinator.async_refresh = AsyncMock()
+    coordinator.last_update_success = False
+    coordinator.last_exception = InsiteApiError("site down")
+
+    with patch("custom_components.insite_energy.asyncio.sleep", AsyncMock()):
+        await _async_startup_refresh(coordinator)
+
+    assert coordinator.async_refresh.await_count == 1 + len(INITIAL_RETRY_DELAYS)

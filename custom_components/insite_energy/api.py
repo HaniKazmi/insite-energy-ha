@@ -56,9 +56,15 @@ class InsiteClient:
         """
         try:
             if self._authenticated:
-                if (view_model := await self._async_fetch_details()) is not None:
-                    return view_model
-                _LOGGER.debug("Session no longer valid, logging in again")
+                # Any failure on the warm path means the session is unusable,
+                # so fall through to a login rather than getting stuck
+                # re-issuing a request that will keep failing.
+                try:
+                    if (view_model := await self._async_fetch_details()) is not None:
+                        return view_model
+                    _LOGGER.debug("Session no longer valid, logging in again")
+                except InsiteApiError as err:
+                    _LOGGER.debug("Session unusable (%s), logging in again", err)
                 self._authenticated = False
 
             return await self._async_login()

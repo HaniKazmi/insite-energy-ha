@@ -1,6 +1,8 @@
 """Sensor platform for Insite Energy."""
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.sensor import (
     SensorEntity,
     SensorDeviceClass,
@@ -16,6 +18,8 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 from .coordinator import InsiteEnergyDataUpdateCoordinator
 from .util import parse_pence, parse_reading_date, utility_key
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -44,12 +48,24 @@ async def async_setup_entry(
         """Add sensors for any utility we haven't seen yet."""
         view_model = coordinator.data or {}
         entities: list[SensorEntity] = []
+        seen_this_pass: set[str] = set()
 
         for utility in view_model.get("UtilityDetails") or []:
             name = utility.get("Name")
             if not name:
                 continue
             key = utility_key(utility)
+            if key in seen_this_pass:
+                # Two utilities sharing a ShortName would otherwise vanish
+                # without a trace. Not seen in the wild, but make it loud.
+                _LOGGER.warning(
+                    "Skipping utility %s: it shares the identifier '%s' with "
+                    "another utility on this account",
+                    name,
+                    key,
+                )
+                continue
+            seen_this_pass.add(key)
             if key in known_utilities:
                 continue
             known_utilities.add(key)

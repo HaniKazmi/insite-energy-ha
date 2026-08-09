@@ -3,7 +3,7 @@
 A custom component for Home Assistant that tracks your account balance, meter
 readings and tariffs from Insite Energy heat networks.
 
-> Requires Home Assistant 2024.8.0 or newer.
+> Requires Home Assistant 2024.11.0 or newer.
 
 ## Installation via HACS
 

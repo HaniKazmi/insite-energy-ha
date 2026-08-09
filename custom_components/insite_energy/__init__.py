@@ -7,6 +7,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.typing import ConfigType
@@ -97,11 +98,14 @@ async def _async_migrate_identifiers(
             slug_to_key[legacy_utility_slug(str(name))] = key
             name_to_key[str(name)] = key
 
+    # Longest first, so "cooling_meter_2" isn't captured by "cooling".
+    slugs_by_length = sorted(slug_to_key, key=len, reverse=True)
+
     def _rekey(remainder: str) -> str:
         """Swap a legacy utility slug for its stable key, if one leads."""
-        for slug, key in slug_to_key.items():
+        for slug in slugs_by_length:
             if remainder.startswith(f"{slug}_"):
-                return f"{key}_{remainder[len(slug) + 1:]}"
+                return f"{slug_to_key[slug]}_{remainder[len(slug) + 1:]}"
         return remainder
 
     @callback
@@ -111,7 +115,12 @@ async def _async_migrate_identifiers(
         remainder = _rekey(reg_entry.unique_id[len(old_prefix):])
         return {"new_unique_id": f"{entry.entry_id}_{remainder}"}
 
-    await er.async_migrate_entries(hass, entry.entry_id, _migrate_entity)
+    # A registry that can't be migrated (say a half-migrated one from an
+    # interrupted setup) must not take the whole integration down with it.
+    try:
+        await er.async_migrate_entries(hass, entry.entry_id, _migrate_entity)
+    except (HomeAssistantError, ValueError):
+        _LOGGER.exception("Could not migrate entity identifiers")
 
     device_reg = dr.async_get(hass)
     for device in dr.async_entries_for_config_entry(device_reg, entry.entry_id):
@@ -127,9 +136,14 @@ async def _async_migrate_identifiers(
             else:
                 new_identifiers.add((domain, identifier))
 
-        if changed:
-            device_reg.async_update_device(
-                device.id, new_identifiers=new_identifiers
+        if not changed:
+            continue
+
+        try:
+            device_reg.async_update_device(device.id, new_identifiers=new_identifiers)
+        except (HomeAssistantError, ValueError) as err:
+            _LOGGER.warning(
+                "Could not migrate device %s: %s", device.name or device.id, err
             )
 
 
@@ -141,6 +155,10 @@ async def _async_startup_refresh(
 
     for delay in INITIAL_RETRY_DELAYS:
         if coordinator.last_update_success:
+            return
+        if isinstance(coordinator.last_exception, ConfigEntryAuthFailed):
+            # Reauth has been raised; retrying just burns known-bad logins
+            # against a site that may well lock the account out.
             return
         await asyncio.sleep(delay)
         await coordinator.async_refresh()

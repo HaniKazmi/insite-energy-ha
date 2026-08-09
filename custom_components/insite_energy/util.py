@@ -15,18 +15,20 @@ _READING_DATE_FORMATS = ("%Y/%m/%d %H:%M", "%Y/%m/%d")
 def parse_pence(value: object) -> float | None:
     """Convert a pence amount like "14.67p" into pounds.
 
-    Returns None if there's no number to read.
+    Returns None when there's no number to read, or when the text holds more
+    than one — better an unknown state than a plausible-looking wrong price.
     """
     if value is None:
         return None
 
-    match = _NUMBER_RE.search(str(value))
-    if not match:
+    # Thousands separators would otherwise split into two "numbers".
+    numbers = _NUMBER_RE.findall(str(value).replace(",", ""))
+    if len(numbers) != 1:
         return None
 
     try:
         # Decimal keeps 14.67p at exactly 0.1467 rather than 0.14670000000000002.
-        return float(Decimal(match.group()) / Decimal(100))
+        return float(Decimal(numbers[0]) / Decimal(100))
     except InvalidOperation:
         return None
 

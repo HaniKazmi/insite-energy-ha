@@ -22,6 +22,10 @@ from custom_components.insite_energy.util import (
         ("0p", 0.0),
         # A credit must keep its sign; the old regex stripped the minus.
         ("-1.20p", -0.012),
+        # Thousands separators must not truncate the value.
+        ("1,234.5p", 12.345),
+        # Ambiguous text yields None rather than a plausible wrong price.
+        ("Tier 1: 14.67p", None),
         (14.67, 0.1467),
         (None, None),
         ("", None),

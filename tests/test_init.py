@@ -5,6 +5,8 @@ import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.components.sensor.recorder import DEFAULT_STATISTICS
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -329,3 +331,44 @@ async def test_startup_refresh_retries_other_failures():
         await _async_startup_refresh(coordinator)
 
     assert coordinator.async_refresh.await_count == 1 + len(INITIAL_RETRY_DELAYS)
+
+
+async def test_price_sensors_are_recorded_as_measurements(hass, config_entry, mock_client):
+    """Rate and standing charge must produce long-term statistics.
+
+    They previously had device_class MONETARY and no state class, so the
+    recorder skipped them entirely. MONETARY permits only state_class TOTAL,
+    which would record a nonsensical running sum of a unit price, so the
+    device class is deliberately absent.
+    """
+    await setup_entry(hass, config_entry)
+
+    for entity_id, unit in (
+        ("sensor.heating_hot_water_11291934_rate", "GBP/kWh"),
+        ("sensor.heating_hot_water_11291934_standing_charge", "GBP/day"),
+    ):
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        state_class = state.attributes.get("state_class")
+        assert state_class is SensorStateClass.MEASUREMENT, entity_id
+        assert state.attributes.get("unit_of_measurement") == unit
+        # MONETARY would make MEASUREMENT invalid and log a warning.
+        assert state.attributes.get("device_class") is None, entity_id
+        # The recorder only compiles statistics for state classes it knows.
+        assert state_class in DEFAULT_STATISTICS, entity_id
+
+
+async def test_balance_keeps_its_monetary_total(hass, config_entry, mock_client):
+    """The balance is a real monetary total and must stay one."""
+    await setup_entry(hass, config_entry)
+
+    state = hass.states.get("sensor.account_details_balance")
+    assert state.attributes.get("device_class") == SensorDeviceClass.MONETARY
+    assert state.attributes.get("state_class") is SensorStateClass.TOTAL
+    assert state.attributes.get("state_class") in DEFAULT_STATISTICS
+
+
+async def test_no_invalid_state_class_warnings(hass, config_entry, mock_client, caplog):
+    """Every device_class/state_class pairing must be one HA considers valid."""
+    await setup_entry(hass, config_entry)
+    assert "impossible considering device class" not in caplog.text

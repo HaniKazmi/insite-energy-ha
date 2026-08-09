@@ -242,7 +242,10 @@ class InsiteUtilityRateSensor(InsiteUtilityEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Rate"
-    _attr_device_class = SensorDeviceClass.MONETARY
+    # Deliberately no device class: MONETARY permits only state_class TOTAL,
+    # which would record a meaningless running sum of the unit price. A rate
+    # is a measurement, so min/mean/max is the statistic worth keeping.
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "GBP/kWh"
     _attr_icon = "mdi:cash-multiple"
 
@@ -265,7 +268,9 @@ class InsiteUtilityStandingChargeSensor(InsiteUtilityEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Standing Charge"
-    _attr_device_class = SensorDeviceClass.MONETARY
+    # See InsiteUtilityRateSensor: a per-day price is a measurement, not a
+    # monetary total.
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "GBP/day"
     _attr_icon = "mdi:cash-clock"
 

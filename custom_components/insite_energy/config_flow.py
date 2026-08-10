@@ -64,7 +64,10 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         client = InsiteClient(session, data[CONF_USERNAME], data[CONF_PASSWORD])
         await client.async_get_data()
     finally:
-        await session.close()
+        # HA replaces close() with a warning stub that closes nothing, since
+        # the connector is shared. detach() is how you release a session HA
+        # isn't cleaning up for us; close() would leak it on every attempt.
+        session.detach()
     return {"title": data[CONF_USERNAME]}
 
 
@@ -154,37 +157,84 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle an options flow for Insite Energy."""
 
+    def _is_taken(self, username: str) -> bool:
+        """Return True if another entry already holds this account."""
+        return any(
+            entry.entry_id != self.config_entry.entry_id
+            and entry.unique_id == username
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+        )
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Manage the options."""
-        if user_input is not None:
-            options = {
-                CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL])
-            }
-            # Credentials belong in entry.data, not options. Blank password
-            # means "unchanged", so it never has to be sent to the browser.
-            new_data = {
-                **self.config_entry.data,
-                CONF_USERNAME: user_input[CONF_USERNAME],
-            }
-            if password := user_input.get(CONF_PASSWORD):
-                new_data[CONF_PASSWORD] = password
-
-            # Write data and options in one go. Two calls would fire the update
-            # listener twice and reload the entry twice. The async_create_entry
-            # below then finds the options unchanged and doesn't fire again.
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, data=new_data, options=options
-            )
-            return self.async_create_entry(title="", data=options)
-
+        errors: dict[str, str] = {}
+        current_username = self.config_entry.data[CONF_USERNAME]
         current_interval = int(
             self.config_entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
             )
         )
-        current_username = self.config_entry.data.get(CONF_USERNAME)
+
+        if user_input is not None:
+            username = user_input[CONF_USERNAME]
+            # Blank password means "unchanged", so it never has to be sent to
+            # the browser.
+            password = (
+                user_input.get(CONF_PASSWORD)
+                or self.config_entry.data[CONF_PASSWORD]
+            )
+
+            if username != current_username and self._is_taken(username):
+                errors["base"] = "already_configured"
+            elif username != current_username or user_input.get(CONF_PASSWORD):
+                # New credentials are checked for the same reason as in the
+                # user and reauth steps: an unvalidated change otherwise only
+                # surfaces later, as a reauth prompt from a failing poll.
+                # Unchanged ones are not, so that an interval change doesn't
+                # sit through a login, or get refused while the site is down.
+                try:
+                    await validate_input(
+                        self.hass,
+                        {CONF_USERNAME: username, CONF_PASSWORD: password},
+                    )
+                except InsiteAuthError:
+                    errors["base"] = "invalid_auth"
+                except InsiteApiError:
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    _LOGGER.exception("Unexpected exception")
+                    errors["base"] = "unknown"
+
+            if not errors:
+                options = {
+                    CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL])
+                }
+                # Credentials belong in entry.data, not options.
+                new_data = {
+                    **self.config_entry.data,
+                    CONF_USERNAME: username,
+                    CONF_PASSWORD: password,
+                }
+
+                # Write data and options in one go. Two calls would fire the
+                # update listener twice and reload the entry twice. The
+                # async_create_entry below then finds the options unchanged and
+                # doesn't fire again. The unique id and title are the email, so
+                # they have to move with it.
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data=new_data,
+                    options=options,
+                    title=username,
+                    unique_id=username,
+                )
+                return self.async_create_entry(title="", data=options)
+
+            # Re-showing the form: keep what was typed, minus the password.
+            current_username = username
+            current_interval = int(user_input[CONF_UPDATE_INTERVAL])
 
         return self.async_show_form(
             step_id="init",
@@ -197,4 +247,5 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                     ): INTERVAL_SELECTOR,
                 }
             ),
+            errors=errors,
         )

@@ -1,4 +1,4 @@
-"""Tests for setup, caching and the identifier migration."""
+"""Tests for setup, caching and the entity identifiers."""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.components.sensor.recorder import DEFAULT_STATISTICS
+from homeassistant.const import CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -22,23 +23,26 @@ from custom_components.insite_energy import (
     _async_startup_refresh,
 )
 from custom_components.insite_energy.const import CACHE_SAVE_DELAY, DOMAIN
+from custom_components.insite_energy.coordinator import (
+    InsiteEnergyDataUpdateCoordinator,
+)
 
 from .conftest import USERNAME
 
-# Every entity the integration creates, as (v1 suffix, v2 suffix).
+# Every entity the integration creates, as a unique id suffix.
 ENTITY_SUFFIXES = [
-    ("account_balance", "account_balance"),
-    ("account_last_poll", "account_last_poll"),
-    ("cooling_reading", "co_reading"),
-    ("cooling_rate", "co_rate"),
-    ("cooling_standing_charge", "co_standing_charge"),
-    ("cooling_reading_date", "co_reading_date"),
-    ("cooling_serial", "co_serial"),
-    ("heating_hot_water_reading", "hh_reading"),
-    ("heating_hot_water_rate", "hh_rate"),
-    ("heating_hot_water_standing_charge", "hh_standing_charge"),
-    ("heating_hot_water_reading_date", "hh_reading_date"),
-    ("heating_hot_water_serial", "hh_serial"),
+    "account_balance",
+    "account_last_poll",
+    "co_reading",
+    "co_rate",
+    "co_standing_charge",
+    "co_reading_date",
+    "co_serial",
+    "hh_reading",
+    "hh_rate",
+    "hh_standing_charge",
+    "hh_reading_date",
+    "hh_serial",
 ]
 
 
@@ -57,12 +61,12 @@ async def test_setup_creates_entities(hass, config_entry, mock_client):
     entries = er.async_entries_for_config_entry(registry, config_entry.entry_id)
     assert len(entries) == len(ENTITY_SUFFIXES)
 
-    expected = {f"{config_entry.entry_id}_{new}" for _, new in ENTITY_SUFFIXES}
+    expected = {f"{config_entry.entry_id}_{suffix}" for suffix in ENTITY_SUFFIXES}
     assert {e.unique_id for e in entries} == expected
 
 
 async def test_no_unique_id_contains_the_email(hass, config_entry, mock_client):
-    """The whole point of the migration: identifiers must not embed the email."""
+    """Identifiers must not embed the email, which the options flow can change."""
     await setup_entry(hass, config_entry)
 
     registry = er.async_get(hass)
@@ -75,60 +79,8 @@ async def test_no_unique_id_contains_the_email(hass, config_entry, mock_client):
             assert USERNAME not in identifier
 
 
-async def test_migrates_v1_entity_unique_ids(hass, config_entry, mock_client):
-    """Pre-existing entities are rekeyed in place, preserving their history."""
-    config_entry.add_to_hass(hass)
-    registry = er.async_get(hass)
-
-    for old, _ in ENTITY_SUFFIXES:
-        registry.async_get_or_create(
-            "sensor",
-            DOMAIN,
-            f"{USERNAME}_{old}",
-            config_entry=config_entry,
-            suggested_object_id=old,
-        )
-    original_ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, config_entry.entry_id)}
-
-    assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
-
-    entries = er.async_entries_for_config_entry(registry, config_entry.entry_id)
-    # No duplicates: the migrated entities are the ones the platform adopted.
-    assert len(entries) == len(ENTITY_SUFFIXES)
-    assert {e.unique_id for e in entries} == {
-        f"{config_entry.entry_id}_{new}" for _, new in ENTITY_SUFFIXES
-    }
-    # Entity IDs are untouched, so dashboards and history survive.
-    assert {e.entity_id for e in entries} == original_ids
-
-
-async def test_migrates_v1_device_identifiers(hass, config_entry, mock_client):
-    """Devices are rekeyed too, so no empty duplicates are left behind."""
-    config_entry.add_to_hass(hass)
-    device_reg = dr.async_get(hass)
-
-    for old in ("account", "Cooling", "Heating & Hot Water"):
-        device_reg.async_get_or_create(
-            config_entry_id=config_entry.entry_id,
-            identifiers={(DOMAIN, f"{USERNAME}_{old}")},
-        )
-
-    assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
-
-    devices = dr.async_entries_for_config_entry(device_reg, config_entry.entry_id)
-    identifiers = {i for d in devices for _, i in d.identifiers}
-    assert identifiers == {
-        f"{config_entry.entry_id}_account",
-        f"{config_entry.entry_id}_co",
-        f"{config_entry.entry_id}_hh",
-    }
-    assert len(devices) == 3
-
-
-async def test_migration_is_idempotent(hass, config_entry, mock_client):
-    """Reloading doesn't rewrite already-migrated identifiers."""
+async def test_reload_keeps_identifiers_stable(hass, config_entry, mock_client):
+    """Reloading must adopt the existing entities rather than duplicate them."""
     await setup_entry(hass, config_entry)
     registry = er.async_get(hass)
     before = {
@@ -223,6 +175,33 @@ async def test_cache_round_trips_the_poll_timestamp(hass, config_entry, mock_cli
     await hass.async_block_till_done()
 
 
+async def test_cache_from_another_account_is_ignored(hass, config_entry, mock_client):
+    """A changed email must not serve the previous account's data as current.
+
+    The cache is keyed on the entry id, which survives the change, so without
+    the account check the balance and readings of the old account would come
+    back up looking like fresh values.
+    """
+    await setup_entry(hass, config_entry)
+    await flush_cache_write(hass)
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # The same account still gets the fast path.
+    coordinator = InsiteEnergyDataUpdateCoordinator(hass, config_entry)
+    assert await coordinator.async_load_cache()
+
+    # Point the entry at a different account, as the options flow does.
+    hass.config_entries.async_update_entry(
+        config_entry,
+        data={**config_entry.data, CONF_USERNAME: "other@example.com"},
+    )
+
+    coordinator = InsiteEnergyDataUpdateCoordinator(hass, config_entry)
+    assert not await coordinator.async_load_cache()
+    assert coordinator.data is None
+
+
 async def test_failed_refresh_marks_entities_unavailable(
     hass, config_entry, mock_client
 ):
@@ -254,39 +233,6 @@ async def test_unload_entry(hass, config_entry, mock_client):
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     await hass.async_block_till_done()
     assert config_entry.entry_id not in hass.data.get(DOMAIN, {})
-
-
-async def test_migration_prefers_the_longest_matching_slug(hass, config_entry, mock_client):
-    """Overlapping utility names must not rekey against the wrong utility.
-
-    "cooling_meter_2_rate" starts with the "cooling" slug, so first-match
-    order produced "co_meter_2_rate" — an id no sensor claims, orphaning the
-    entity and losing its history.
-    """
-    mock_client.async_get_data.return_value = {
-        "CreditAccountBalance": "-47.53",
-        "UtilityDetails": [
-            {"Name": "Cooling", "ShortName": "CO", "LastMeterReading": "1"},
-            {"Name": "Cooling Meter 2", "ShortName": "C2", "LastMeterReading": "2"},
-        ],
-    }
-    config_entry.add_to_hass(hass)
-    registry = er.async_get(hass)
-    registry.async_get_or_create(
-        "sensor", DOMAIN, f"{USERNAME}_cooling_meter_2_rate", config_entry=config_entry
-    )
-    registry.async_get_or_create(
-        "sensor", DOMAIN, f"{USERNAME}_cooling_rate", config_entry=config_entry
-    )
-
-    assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
-
-    unique_ids = {
-        e.unique_id for e in er.async_entries_for_config_entry(registry, config_entry.entry_id)
-    }
-    assert f"{config_entry.entry_id}_c2_rate" in unique_ids
-    assert f"{config_entry.entry_id}_co_meter_2_rate" not in unique_ids
 
 
 async def test_duplicate_short_name_is_logged(hass, config_entry, mock_client, caplog):

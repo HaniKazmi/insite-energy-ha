@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import InsiteApiError, InsiteAuthError, InsiteClient
 from .const import (
+    CACHE_ACCOUNT_KEY,
     CACHE_SAVE_DELAY,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
@@ -78,6 +79,14 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         if not cached:
             return False
 
+        # The cache is keyed on the entry id, which survives an email change in
+        # the options flow. Serving the previous account's balance and readings
+        # as current would look like real data, so anything we can't attribute
+        # to the configured account is discarded.
+        if cached.get(CACHE_ACCOUNT_KEY) != self.username:
+            _LOGGER.debug("Cached data belongs to another account, ignoring it")
+            return False
+
         # JSON has no datetime type, so the poll timestamp comes back as a string.
         last_poll = cached.get(LAST_POLL_KEY)
         if isinstance(last_poll, str):
@@ -98,5 +107,6 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error communicating with API: {err}") from err
 
         view_model[LAST_POLL_KEY] = dt_util.utcnow()
+        view_model[CACHE_ACCOUNT_KEY] = self.username
         self._store.async_delay_save(lambda: view_model, CACHE_SAVE_DELAY)
         return view_model

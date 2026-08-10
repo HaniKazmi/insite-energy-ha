@@ -51,11 +51,8 @@ def parse_reading_date(value: object, tzinfo) -> datetime | None:
     return None
 
 
-def legacy_utility_slug(name: str) -> str:
-    """Return the slug used by v1 unique IDs.
-
-    Only needed to recognise pre-migration entity IDs.
-    """
+def _name_slug(name: str) -> str:
+    """Return an identifier-safe form of a utility's display name."""
     return name.replace(" & ", "_").replace(" ", "_").lower()
 
 
@@ -69,4 +66,4 @@ def utility_key(utility: dict) -> str:
     short_name = utility.get("ShortName")
     if short_name:
         return str(short_name).strip().lower()
-    return legacy_utility_slug(str(utility.get("Name") or "unknown"))
+    return _name_slug(str(utility.get("Name") or "unknown"))

@@ -38,6 +38,12 @@
           "update_interval": "Update Interval (hours)"
         }
       }
+    },
+    "error": {
+      "cannot_connect": "[%key:component::insite_energy::config::error::cannot_connect%]",
+      "invalid_auth": "[%key:component::insite_energy::config::error::invalid_auth%]",
+      "unknown": "[%key:component::insite_energy::config::error::unknown%]",
+      "already_configured": "[%key:component::insite_energy::config::abort::already_configured%]"
     }
   },
   "services": {

@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import pytest
 
 from custom_components.insite_energy.util import (
-    legacy_utility_slug,
     parse_pence,
     parse_reading_date,
     utility_key,
@@ -72,10 +71,5 @@ def test_utility_key_prefers_short_name():
 def test_utility_key_falls_back_to_slug():
     """Without a ShortName we still produce a stable key."""
     assert utility_key({"Name": "Heating & Hot Water"}) == "heating_hot_water"
+    assert utility_key({"Name": "Cooling"}) == "cooling"
     assert utility_key({}) == "unknown"
-
-
-def test_legacy_utility_slug():
-    """The v1 slug is reproduced exactly, so migration can recognise it."""
-    assert legacy_utility_slug("Heating & Hot Water") == "heating_hot_water"
-    assert legacy_utility_slug("Cooling") == "cooling"

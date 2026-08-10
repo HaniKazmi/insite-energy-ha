@@ -1,17 +1,21 @@
 """Tests for the config, options and reauth flows."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.insite_energy import config_flow
 from custom_components.insite_energy.api import InsiteApiError, InsiteAuthError
 from custom_components.insite_energy.const import CONF_UPDATE_INTERVAL, DOMAIN
 
 from .conftest import PASSWORD, USERNAME
+
+NEW_USERNAME = "new@example.com"
 
 
 async def test_user_flow_creates_entry(hass, mock_client):
@@ -27,6 +31,35 @@ async def test_user_flow_creates_entry(hass, mock_client):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD}
+
+
+async def test_validation_releases_its_session(hass, mock_client, caplog):
+    """The throwaway session must actually be released.
+
+    HA replaces close() on its sessions with a stub that only warns, so an
+    awaited close() leaks the session (and logs) on every attempt.
+    """
+    sessions = []
+    create_session = config_flow.async_create_clientsession
+
+    def track(*args, **kwargs):
+        session = create_session(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    with patch.object(config_flow, "async_create_clientsession", track):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD},
+        )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert len(sessions) == 1
+    assert sessions[0].closed
+    assert "closes the Home Assistant aiohttp session" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -170,6 +203,115 @@ async def test_options_flow_sets_a_new_password(hass, config_entry, mock_client)
     await hass.async_block_till_done()
 
     assert config_entry.data[CONF_PASSWORD] == "rotated"
+
+
+async def test_options_flow_moves_the_unique_id_with_the_email(
+    hass, config_entry, mock_client
+):
+    """The unique id and title are the email, so they have to follow it."""
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_USERNAME: NEW_USERNAME, CONF_UPDATE_INTERVAL: 12},
+    )
+    await hass.async_block_till_done()
+
+    assert config_entry.data[CONF_USERNAME] == NEW_USERNAME
+    # Left behind, these would still identify the entry by the old account, so
+    # re-adding that account would be refused as a duplicate.
+    assert config_entry.unique_id == NEW_USERNAME
+    assert config_entry.title == NEW_USERNAME
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (InsiteAuthError("bad"), "invalid_auth"),
+        (InsiteApiError("down"), "cannot_connect"),
+        (RuntimeError("boom"), "unknown"),
+    ],
+)
+async def test_options_flow_validates_credentials(
+    hass, config_entry, mock_client, error, expected
+):
+    """Credentials that don't work must not be stored.
+
+    Unvalidated, a typo only surfaces later as a reauth prompt from a failing
+    poll, with the working credentials already overwritten.
+    """
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    mock_client.async_get_data.side_effect = error
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_USERNAME: NEW_USERNAME,
+            CONF_PASSWORD: "typo",
+            CONF_UPDATE_INTERVAL: 6,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": expected}
+    assert config_entry.data[CONF_USERNAME] == USERNAME
+    assert config_entry.data[CONF_PASSWORD] == PASSWORD
+    assert config_entry.options.get(CONF_UPDATE_INTERVAL) != 6
+
+
+async def test_options_flow_interval_change_skips_the_login(
+    hass, config_entry, mock_client
+):
+    """Unchanged credentials need no check.
+
+    A login takes tens of seconds and fails outright when the site is down,
+    neither of which should stand between the user and the poll interval.
+    """
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    with patch.object(config_flow, "validate_input", AsyncMock()) as validate:
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_USERNAME: USERNAME, CONF_PASSWORD: "", CONF_UPDATE_INTERVAL: 6},
+        )
+        await hass.async_block_till_done()
+
+    validate.assert_not_awaited()
+    assert config_entry.options == {CONF_UPDATE_INTERVAL: 6}
+
+
+async def test_options_flow_rejects_an_email_in_use(hass, config_entry, mock_client):
+    """Two entries on one account would fight over the same identifiers."""
+    other = MockConfigEntry(
+        domain=DOMAIN,
+        title=NEW_USERNAME,
+        unique_id=NEW_USERNAME,
+        data={CONF_USERNAME: NEW_USERNAME, CONF_PASSWORD: PASSWORD},
+    )
+    other.add_to_hass(hass)
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_USERNAME: NEW_USERNAME, CONF_UPDATE_INTERVAL: 12},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "already_configured"}
+    assert config_entry.data[CONF_USERNAME] == USERNAME
 
 
 async def test_options_flow_reloads_once(hass, config_entry, mock_client):

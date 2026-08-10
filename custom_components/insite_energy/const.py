@@ -16,8 +16,9 @@ DEFAULT_UPDATE_INTERVAL = 12
 MIN_UPDATE_INTERVAL = 1
 MAX_UPDATE_INTERVAL = 168
 
-# Key used to stash the poll timestamp inside the viewModel dict.
+# Keys used to stash our own metadata inside the viewModel dict.
 LAST_POLL_KEY = "_last_poll_time"
+CACHE_ACCOUNT_KEY = "_cached_for_username"
 
 # On-disk cache of the last successful response, so entities can be restored
 # at startup without waiting for the (slow) website.

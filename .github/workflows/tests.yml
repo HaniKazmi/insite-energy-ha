@@ -18,6 +18,10 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+          # The deps live in requirements_test.txt, which the default glob
+          # (**/requirements.txt, **/pyproject.toml) doesn't match, and an
+          # unmatched path fails the step rather than skipping the cache.
+          cache-dependency-path: requirements_test.txt
 
       - name: Install dependencies
         run: |

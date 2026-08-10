@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -16,8 +15,6 @@ from .coordinator import (
     InsiteEnergyDataUpdateCoordinator,
     async_get_cache_store,
 )
-
-_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 

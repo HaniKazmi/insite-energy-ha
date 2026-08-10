@@ -42,8 +42,7 @@
     "error": {
       "cannot_connect": "Failed to connect",
       "invalid_auth": "Invalid authentication",
-      "unknown": "Unexpected error",
-      "already_configured": "Account is already configured"
+      "unknown": "Unexpected error"
     }
   },
   "services": {

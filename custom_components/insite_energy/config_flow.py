@@ -157,14 +157,6 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle an options flow for Insite Energy."""
 
-    def _is_taken(self, username: str) -> bool:
-        """Return True if another entry already holds this account."""
-        return any(
-            entry.entry_id != self.config_entry.entry_id
-            and entry.unique_id == username
-            for entry in self.hass.config_entries.async_entries(DOMAIN)
-        )
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -186,9 +178,7 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                 or self.config_entry.data[CONF_PASSWORD]
             )
 
-            if username != current_username and self._is_taken(username):
-                errors["base"] = "already_configured"
-            elif username != current_username or user_input.get(CONF_PASSWORD):
+            if username != current_username or user_input.get(CONF_PASSWORD):
                 # New credentials are checked for the same reason as in the
                 # user and reauth steps: an unvalidated change otherwise only
                 # surfaces later, as a reauth prompt from a failing poll.

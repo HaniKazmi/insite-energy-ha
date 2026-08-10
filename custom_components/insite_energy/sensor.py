@@ -15,7 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, LAST_POLL_KEY
 from .coordinator import InsiteEnergyDataUpdateCoordinator
 from .util import parse_pence, parse_reading_date, utility_key
 
@@ -204,7 +204,7 @@ class InsiteAccountLastPollSensor(InsiteAccountEntity, SensorEntity):
     def native_value(self):
         """Return the state."""
         if self.coordinator.data:
-            return self.coordinator.data.get("_last_poll_time")
+            return self.coordinator.data.get(LAST_POLL_KEY)
         return None
 
 

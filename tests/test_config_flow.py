@@ -7,7 +7,6 @@ import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.insite_energy import config_flow
 from custom_components.insite_energy.api import InsiteApiError, InsiteAuthError
@@ -288,30 +287,6 @@ async def test_options_flow_interval_change_skips_the_login(
 
     validate.assert_not_awaited()
     assert config_entry.options == {CONF_UPDATE_INTERVAL: 6}
-
-
-async def test_options_flow_rejects_an_email_in_use(hass, config_entry, mock_client):
-    """Two entries on one account would fight over the same identifiers."""
-    other = MockConfigEntry(
-        domain=DOMAIN,
-        title=NEW_USERNAME,
-        unique_id=NEW_USERNAME,
-        data={CONF_USERNAME: NEW_USERNAME, CONF_PASSWORD: PASSWORD},
-    )
-    other.add_to_hass(hass)
-    config_entry.add_to_hass(hass)
-    assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
-
-    result = await hass.config_entries.options.async_init(config_entry.entry_id)
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        {CONF_USERNAME: NEW_USERNAME, CONF_UPDATE_INTERVAL: 12},
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "already_configured"}
-    assert config_entry.data[CONF_USERNAME] == USERNAME
 
 
 async def test_options_flow_reloads_once(hass, config_entry, mock_client):

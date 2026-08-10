@@ -45,9 +45,10 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         # HA's shared session. The client relies on the cookies persisting
         # between polls to skip the slow login. Created during entry setup, so
         # HA detaches it on unload; closing it here is forbidden.
-        self.session = async_create_clientsession(hass)
         self.client = InsiteClient(
-            self.session, self.username, entry.data[CONF_PASSWORD]
+            async_create_clientsession(hass),
+            self.username,
+            entry.data[CONF_PASSWORD],
         )
         self._store = async_get_cache_store(hass, entry.entry_id)
 

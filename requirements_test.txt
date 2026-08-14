@@ -1,1 +1,17 @@
-pytest-homeassistant-custom-component
+# Pinned deliberately. This package pulls in Home Assistant itself, so leaving
+# it floating means every CI run silently tests a different HA — and a release
+# can break the build with no change of ours. It also needs Python >= 3.14; on
+# 3.13 pip quietly resolves back to 0.13.316 (HA 2026.2.3) instead of failing,
+# which is how CI ended up six months behind without anyone noticing.
+#
+# The `latest` job in tests.yml installs this unpinned on a schedule, so
+# upstream breakage still surfaces — on our timetable rather than mid-PR.
+pytest-homeassistant-custom-component==0.13.355
+
+# Used by the pytest --cov flags. It arrives transitively today, which is not
+# the same as being guaranteed.
+pytest-cov==7.0.0
+
+# Pinned so `ruff check` means the same thing run to run; its default rule set
+# moves between releases.
+ruff==0.16.3

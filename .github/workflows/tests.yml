@@ -3,20 +3,34 @@ name: Tests
 on:
   push:
   pull_request:
+  schedule:
+    # Only the `latest` job needs this: our own deps are pinned, so a scheduled
+    # run of `pytest` alone would tell us nothing new.
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A push to a branch with an open PR triggers both events; without this they
+# run twice and neither cancels when the branch moves on.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          # pytest-homeassistant-custom-component requires >= 3.14. On 3.13 pip
+          # resolves to an old release rather than failing, which pins the whole
+          # suite to a Home Assistant six months behind.
+          python-version: "3.14"
           cache: pip
           # The deps live in requirements_test.txt, which the default glob
           # (**/requirements.txt, **/pyproject.toml) doesn't match, and an
@@ -29,4 +43,56 @@ jobs:
           pip install -r requirements_test.txt
 
       - name: Run tests
-        run: pytest --cov=custom_components.insite_energy --cov-report=term-missing
+        run: >
+          pytest
+          --cov=custom_components.insite_energy
+          --cov-report=term-missing
+          --cov-fail-under=90
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+
+      - name: Install ruff
+        # Only ruff, not the whole Home Assistant tree, so this stays quick.
+        run: pip install $(grep '^ruff==' requirements_test.txt)
+
+      - name: Lint
+        # Rule selection lives in ruff.toml. `ruff format` is deliberately not
+        # run: the existing code is not black-formatted, and reformatting it
+        # would bury real changes in whitespace.
+        run: ruff check --output-format=github .
+
+  latest:
+    # Early warning that a new Home Assistant breaks us, without letting it
+    # fail a PR that changed nothing relevant.
+    name: latest Home Assistant (informational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install the newest release
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest-homeassistant-custom-component pytest-cov
+
+      - name: Report the versions under test
+        run: pip show homeassistant pytest-homeassistant-custom-component | grep -E '^(Name|Version)'
+
+      - name: Run tests
+        run: pytest

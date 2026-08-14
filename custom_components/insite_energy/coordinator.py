@@ -5,7 +5,7 @@ from datetime import timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
@@ -19,11 +19,13 @@ from .const import (
     CACHE_ACCOUNT_KEY,
     CACHE_SAVE_DELAY,
     CONF_UPDATE_INTERVAL,
+    CONF_WEIGHTS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LAST_POLL_KEY,
     STORAGE_VERSION,
 )
+from .statistics import async_publish_spread_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize."""
         self.username = entry.data[CONF_USERNAME]
+        self._reannounce = False
         # Use a dedicated session to avoid cookie cross-contamination with
         # HA's shared session. The client relies on the cookies persisting
         # between polls to skip the slow login. Created during entry setup, so
@@ -63,6 +66,36 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=timedelta(hours=interval_hours),
         )
+
+    @property
+    def reannouncing(self) -> bool:
+        """Whether entities should write state even where nothing changed."""
+        return self._reannounce
+
+    @callback
+    def async_reannounce(self) -> None:
+        """Re-write every entity's state, unchanged values included.
+
+        The energy dashboard's cost sensor accrues nothing on the first meter
+        event it sees - it takes that reading as a baseline - and it only
+        initialises from a state_changed event. Announcing an unchanged reading
+        gives it something harmless to baseline on, instead of it swallowing a
+        real day's consumption later.
+
+        Home Assistant collapses a write whose state and attributes are both
+        unchanged into a state_reported event, which the cost sensor does not
+        listen for, so InsiteUtilityReadingSensor reports force_update while
+        this runs. The flag is only ever true for the duration of this call,
+        which is why setting it lives here beside the thing it guards rather
+        than at the caller.
+        """
+        self._reannounce = True
+        try:
+            # Synchronous, and callback listeners run inside bus.async_fire, so
+            # the cost sensors have taken their baseline by the time it returns.
+            self.async_update_listeners()
+        finally:
+            self._reannounce = False
 
     async def async_load_cache(self) -> bool:
         """Seed data from the last successful poll stored on disk.
@@ -110,4 +143,15 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         view_model[LAST_POLL_KEY] = dt_util.utcnow()
         view_model[CACHE_ACCOUNT_KEY] = self.username
         self._store.async_delay_save(lambda: view_model, CACHE_SAVE_DELAY)
+
+        # self.data is still the previous snapshot here, which is what tells us
+        # the period this reading covers. Failures are handled in there, so the
+        # poll cannot be lost to them.
+        await async_publish_spread_statistics(
+            self.hass,
+            self.data,
+            view_model,
+            self.config_entry.options.get(CONF_WEIGHTS) or {},
+        )
+
         return view_model

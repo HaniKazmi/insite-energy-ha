@@ -16,6 +16,15 @@ DEFAULT_UPDATE_INTERVAL = 12
 MIN_UPDATE_INTERVAL = 1
 MAX_UPDATE_INTERVAL = 168
 
+# Per-utility weighting for the spread statistics, keyed on utility_key(). Each
+# value is a single statistic id whose long-term statistics say when that
+# utility was in use; a missing entry spreads its readings evenly instead.
+CONF_WEIGHTS = "weights"
+
+# Suffixes for the external statistics we publish, e.g. "insite_energy:hh_energy".
+STAT_ENERGY_SUFFIX = "energy"
+STAT_COST_SUFFIX = "cost"
+
 # Keys used to stash our own metadata inside the viewModel dict.
 LAST_POLL_KEY = "_last_poll_time"
 CACHE_ACCOUNT_KEY = "_cached_for_username"

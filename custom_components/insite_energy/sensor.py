@@ -226,6 +226,14 @@ class InsiteUtilityReadingSensor(InsiteUtilityEntity, SensorEntity):
         self._attr_unique_id = f"{self._base_id}_{self.utility_key}_reading"
 
     @property
+    def force_update(self) -> bool:
+        """Force a state_changed event during the startup re-announcement.
+
+        See InsiteEnergyDataUpdateCoordinator.async_reannounce for why.
+        """
+        return self.coordinator.reannouncing
+
+    @property
     def native_value(self):
         """Return the state."""
         data = self._get_utility_data()

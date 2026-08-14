@@ -14,6 +14,8 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    StatisticSelector,
+    StatisticSelectorConfig,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -23,10 +25,12 @@ from .api import InsiteApiError, InsiteAuthError, InsiteClient
 from .const import (
     DOMAIN,
     CONF_UPDATE_INTERVAL,
+    CONF_WEIGHTS,
     DEFAULT_UPDATE_INTERVAL,
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
 )
+from .util import utility_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -154,8 +158,45 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return InsiteEnergyOptionsFlowHandler()
 
 
+WEIGHT_FIELD_PREFIX = "weight_"
+
+# Lists what recorder actually holds statistics for, which is the real question
+# - a weight is read back weeks later, so anything without them is useless. It
+# cannot be filtered, so it also offers this integration's own output;
+# statistics.py refuses that rather than trusting the picker.
+WEIGHT_SELECTOR = StatisticSelector(StatisticSelectorConfig())
+
+
 class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle an options flow for Insite Energy."""
+
+    def _weights_from_input(
+        self, user_input: dict[str, Any], utilities: dict[str, str]
+    ) -> dict[str, str]:
+        """Pull the per-utility weights out of submitted form data.
+
+        Cleared fields come back absent, and are dropped rather than stored as
+        empty, so an unweighted utility looks the same as one never configured.
+        """
+        return {
+            key: value
+            for key in utilities
+            if (value := user_input.get(f"{WEIGHT_FIELD_PREFIX}{key}"))
+        }
+
+    def _known_utilities(self) -> dict[str, str]:
+        """Return {utility_key: display name} from the last poll.
+
+        Utilities are discovered rather than configured, so the weighting
+        fields can only be offered for the ones we have actually seen.
+        """
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        data = getattr(coordinator, "data", None) or {}
+        return {
+            utility_key(u): str(u.get("Name"))
+            for u in (data.get("UtilityDetails") or [])
+            if u.get("Name")
+        }
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -168,6 +209,8 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
             )
         )
+        utilities = self._known_utilities()
+        current_weights = dict(self.config_entry.options.get(CONF_WEIGHTS) or {})
 
         if user_input is not None:
             username = user_input[CONF_USERNAME]
@@ -201,6 +244,22 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                 options = {
                     CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL])
                 }
+                # Only the utilities this form actually rendered are
+                # authoritative. A cleared field means "unweighted", but a
+                # utility missing from the current poll - a degraded scrape, or
+                # an entry that has not finished setting up - has no field here
+                # at all, and must keep the weight it already had rather than
+                # lose it silently. Read from the entry rather than
+                # current_weights, which the error-re-show path reassigns.
+                saved = self.config_entry.options.get(CONF_WEIGHTS) or {}
+                weights = {
+                    **{k: v for k, v in saved.items() if k not in utilities},
+                    **self._weights_from_input(user_input, utilities),
+                }
+                # The key is omitted entirely when nothing is weighted, so
+                # options stay empty until they are actually used.
+                if weights:
+                    options[CONF_WEIGHTS] = weights
                 # Credentials belong in entry.data, not options.
                 new_data = {
                     **self.config_entry.data,
@@ -225,17 +284,30 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
             # Re-showing the form: keep what was typed, minus the password.
             current_username = username
             current_interval = int(user_input[CONF_UPDATE_INTERVAL])
+            current_weights = self._weights_from_input(user_input, utilities)
+
+        schema: dict[Any, Any] = {
+            vol.Required(CONF_USERNAME, default=current_username): str,
+            vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
+            vol.Required(
+                CONF_UPDATE_INTERVAL, default=current_interval
+            ): INTERVAL_SELECTOR,
+        }
+        # One weighting field per utility. Left empty, that utility's readings
+        # are spread evenly across the period they cover.
+        for key in utilities:
+            schema[
+                vol.Optional(
+                    f"{WEIGHT_FIELD_PREFIX}{key}",
+                    description={"suggested_value": current_weights.get(key)},
+                )
+            ] = WEIGHT_SELECTOR
 
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_USERNAME, default=current_username): str,
-                    vol.Optional(CONF_PASSWORD): PASSWORD_SELECTOR,
-                    vol.Required(
-                        CONF_UPDATE_INTERVAL, default=current_interval
-                    ): INTERVAL_SELECTOR,
-                }
-            ),
+            data_schema=vol.Schema(schema),
+            description_placeholders={
+                "utilities": ", ".join(utilities.values()) or "none discovered yet"
+            },
             errors=errors,
         )

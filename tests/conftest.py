@@ -1,6 +1,7 @@
 """Fixtures for Insite Energy tests."""
 from __future__ import annotations
 
+import copy
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,7 +16,12 @@ PASSWORD = "hunter2"
 
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
-    """Let HA load the integration from custom_components/."""
+    """Let HA load the integration from custom_components/.
+
+    This pulls in `hass`, and being autouse it does so before anything a test
+    asked for by name. A test needing the real recorder has to get `recorder_mock`
+    in first, which it cannot do from here - see tests/test_statistics_recorder.py.
+    """
     return
 
 
@@ -69,7 +75,21 @@ def mock_client(view_model):
     whichever path it is exercising.
     """
     instance = AsyncMock()
-    instance.async_get_data = AsyncMock(return_value=view_model)
+
+    # A fresh copy per poll. Returning the same object would make the
+    # coordinator's previous snapshot *be* the new payload, so anything that
+    # compares the two - the spread statistics, notably - would see no change
+    # and quietly do nothing, in tests only.
+    #
+    # A test may still set `return_value` to shape the payload; honour it rather
+    # than let this side_effect silently win, which is the usual Mock surprise.
+    async def _get_data():
+        payload = instance.async_get_data.return_value
+        if not isinstance(payload, dict):
+            payload = view_model
+        return copy.deepcopy(payload)
+
+    instance.async_get_data = AsyncMock(side_effect=_get_data)
 
     with patch(
         "custom_components.insite_energy.coordinator.InsiteClient",

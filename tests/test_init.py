@@ -2,18 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.components.sensor.recorder import DEFAULT_STATISTICS
-from homeassistant.const import CONF_USERNAME
-from homeassistant.core import HomeAssistant
+from homeassistant.const import CONF_USERNAME, EVENT_STATE_CHANGED
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    async_capture_events,
     async_fire_time_changed,
 )
 
@@ -22,7 +24,7 @@ from custom_components.insite_energy import (
     INITIAL_RETRY_DELAYS,
     _async_startup_refresh,
 )
-from custom_components.insite_energy.const import CACHE_SAVE_DELAY, DOMAIN
+from custom_components.insite_energy.const import CACHE_SAVE_DELAY, CONF_WEIGHTS, DOMAIN
 from custom_components.insite_energy.coordinator import (
     InsiteEnergyDataUpdateCoordinator,
 )
@@ -279,6 +281,134 @@ async def test_startup_refresh_retries_other_failures():
     assert coordinator.async_refresh.await_count == 1 + len(INITIAL_RETRY_DELAYS)
 
 
+# --- Startup re-announcement -------------------------------------------------
+#
+# The energy dashboard's cost sensor accrues nothing on the first meter event it
+# sees; it takes that reading as its baseline. Because this meter only moves once
+# a day, that event is usually a real increment, and the day's cost is lost. We
+# re-announce the cached reading once HA is up so it baselines on something
+# harmless, and we do it strictly before the refresh so a meter that moved while
+# HA was down still arrives as a chargeable delta.
+
+METER = "sensor.heating_hot_water_11291934_meter_reading"
+RATE = "sensor.heating_hot_water_11291934_rate"
+
+
+async def restart_with_reading(
+    hass, config_entry, mock_client, view_model, reading: str
+) -> list:
+    """Restart from cache with the site reporting `reading`, capturing states.
+
+    The cache must already be seeded. HA is put back into `not_running` so the
+    re-announcement has to wait for startup, as it does on a real boot.
+    """
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    payload = copy.deepcopy(view_model)
+    for utility in payload["UtilityDetails"]:
+        if utility["ShortName"] == "HH":
+            utility["LastMeterReading"] = reading
+    mock_client.async_get_data.side_effect = None
+    mock_client.async_get_data.return_value = payload
+
+    hass.set_state(CoreState.not_running)
+    events = async_capture_events(hass, EVENT_STATE_CHANGED)
+
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.async_start()
+    await hass.async_block_till_done()
+
+    return events
+
+
+def transitions(events: list, entity_id: str) -> list[tuple[str | None, str | None]]:
+    """The (old, new) state pairs captured for one entity, in order."""
+    return [
+        (
+            event.data["old_state"].state if event.data["old_state"] else None,
+            event.data["new_state"].state if event.data["new_state"] else None,
+        )
+        for event in events
+        if event.data["entity_id"] == entity_id
+    ]
+
+
+async def test_meter_reading_is_reannounced_before_the_startup_refresh(
+    hass, config_entry, mock_client, view_model, hass_storage
+):
+    """A meter that moved while HA was down must still be charged.
+
+    The re-announcement has to land first so the cost sensor baselines on the
+    cached 2999; the refresh then delivers 3000 as a real 1 kWh delta. If the
+    order flips, the cost sensor baselines on 3000 and the kWh is lost.
+    """
+    await setup_entry(hass, config_entry)
+    await flush_cache_write(hass)
+
+    events = await restart_with_reading(
+        hass, config_entry, mock_client, view_model, "3000.000"
+    )
+    seq = transitions(events, METER)
+
+    assert ("2999.0", "2999.0") in seq, f"reading was never re-announced: {seq}"
+    assert ("2999.0", "3000.0") in seq, f"refresh delta never landed: {seq}"
+    assert seq.index(("2999.0", "2999.0")) < seq.index(("2999.0", "3000.0")), (
+        f"refresh beat the re-announcement, so the kWh was swallowed: {seq}"
+    )
+
+
+async def test_reannouncement_fires_even_when_the_reading_is_unchanged(
+    hass, config_entry, mock_client, view_model, hass_storage
+):
+    """The common case: nothing moved, but the cost sensor still needs an event.
+
+    HA collapses a write whose state and attributes are unchanged into a
+    state_reported event, which the cost sensor does not listen for. This only
+    passes because the sensor sets force_update for that one write.
+    """
+    await setup_entry(hass, config_entry)
+    await flush_cache_write(hass)
+
+    events = await restart_with_reading(
+        hass, config_entry, mock_client, view_model, "2999.000"
+    )
+
+    assert ("2999.0", "2999.0") in transitions(events, METER)
+
+
+async def test_reannouncement_is_limited_to_the_meter_reading(
+    hass, config_entry, mock_client, view_model, hass_storage
+):
+    """Only the energy entity needs forcing; the cost sensor reads the rate directly."""
+    await setup_entry(hass, config_entry)
+    await flush_cache_write(hass)
+
+    events = await restart_with_reading(
+        hass, config_entry, mock_client, view_model, "2999.000"
+    )
+
+    unchanged = [(old, new) for old, new in transitions(events, RATE) if old == new]
+    assert not unchanged, f"rate was force-written too: {unchanged}"
+
+
+async def test_force_update_is_cleared_after_the_reannouncement(
+    hass, config_entry, mock_client, view_model, hass_storage
+):
+    """Ordinary coordinator writes must keep collapsing, or the recorder bloats."""
+    await setup_entry(hass, config_entry)
+    await flush_cache_write(hass)
+
+    await restart_with_reading(
+        hass, config_entry, mock_client, view_model, "2999.000"
+    )
+
+    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    assert coordinator.reannouncing is False
+
+
 async def test_price_sensors_are_recorded_as_measurements(hass, config_entry, mock_client):
     """Rate and standing charge must produce long-term statistics.
 
@@ -318,3 +448,53 @@ async def test_no_invalid_state_class_warnings(hass, config_entry, mock_client, 
     """Every device_class/state_class pairing must be one HA considers valid."""
     await setup_entry(hass, config_entry)
     assert "impossible considering device class" not in caplog.text
+
+
+async def test_the_coordinator_publishes_spread_statistics(
+    hass, config_entry, mock_client, view_model
+):
+    """The coordinator must actually reach the statistics module, with the
+    previous snapshot and the configured weights.
+
+    Nothing covered this wiring: deleting the call outright, passing the new
+    payload as both previous and current, or reading weights from the wrong
+    options key all left the suite green.
+    """
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        config_entry, options={CONF_WEIGHTS: {"co": "sensor.cooling_activity"}}
+    )
+
+    calls = []
+    with patch(
+        "custom_components.insite_energy.coordinator.async_publish_spread_statistics",
+        side_effect=lambda hass, previous, current, weights: calls.append(
+            (previous, current, weights)
+        ),
+    ):
+        assert await hass.config_entries.async_setup(config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        # A second poll, so there is a previous snapshot to compare against.
+        moved = copy.deepcopy(view_model)
+        for utility in moved["UtilityDetails"]:
+            if utility["ShortName"] == "CO":
+                utility["LastMeterReading"] = "600.000"
+                utility["MeterReadingDate"] = "2026/09/04 00:00"
+        mock_client.async_get_data.return_value = moved
+        await hass.data[DOMAIN][config_entry.entry_id].async_refresh()
+        await hass.async_block_till_done()
+
+    assert calls, "the coordinator never reached the statistics module"
+    previous, current, weights = calls[-1]
+
+    # The weights must arrive keyed the way the options flow stores them.
+    assert weights == {"co": "sensor.cooling_activity"}
+
+    # previous and current must be different snapshots, or no window exists.
+    def cooling(payload):
+        return next(u for u in payload["UtilityDetails"] if u["ShortName"] == "CO")
+
+    assert previous is not None
+    assert cooling(previous)["LastMeterReading"] != cooling(current)["LastMeterReading"]
+    assert cooling(current)["LastMeterReading"] == "600.000"

@@ -31,11 +31,13 @@
     "step": {
       "init": {
         "title": "Configure Insite Energy",
-        "description": "Adjust integration settings.",
+        "description": "Adjust integration settings. Each discovered utility ({utilities}) gets its own weight field: pick a statistic whose activity that utility's readings should follow, or leave it blank to spread each reading evenly across the period it covers. Do not pick this integration's own insite_energy statistics.",
         "data": {
           "username": "[%key:component::insite_energy::config::step::user::data::username%]",
           "password": "Password (leave blank to keep the current one)",
-          "update_interval": "Update Interval (hours)"
+          "update_interval": "Update Interval (hours)",
+          "weight_hh": "Weight - Heating & Hot Water",
+          "weight_co": "Weight - Cooling"
         }
       }
     },

@@ -5,9 +5,10 @@ import asyncio
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
@@ -46,15 +47,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = InsiteEnergyDataUpdateCoordinator(hass, entry)
 
-    if await coordinator.async_load_cache():
-        # Come up immediately on the previous run's data and refresh in the
-        # background, so a slow login doesn't hold up HA startup.
-        entry.async_create_background_task(
-            hass,
-            _async_startup_refresh(coordinator),
-            f"{DOMAIN} startup refresh",
-        )
-    else:
+    # Come up immediately on the previous run's data and fetch a newer reading
+    # in the background, so a slow login doesn't hold up HA startup.
+    served_from_cache = await coordinator.async_load_cache()
+    if not served_from_cache:
         # Nothing cached (first run), so we have no choice but to wait.
         await coordinator.async_config_entry_first_refresh()
 
@@ -62,9 +58,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    @callback
+    def _schedule_startup_work(_hass: HomeAssistant) -> None:
+        # Kept as a background task on the entry so unload cancels a refresh
+        # that is still waiting on a slow login.
+        entry.async_create_background_task(
+            hass,
+            _async_announce_then_refresh(coordinator, refresh=served_from_cache),
+            f"{DOMAIN} startup refresh",
+        )
+
+    # Registered *after* the platforms, and only ever here: when HA is already
+    # running - a reload, or adding the entry - this fires immediately, so the
+    # meter entities have to exist by now or the re-announcement finds nothing
+    # to announce.
+    entry.async_on_unload(async_at_started(hass, _schedule_startup_work))
+
     entry.async_on_unload(entry.add_update_listener(update_listener))
 
     return True
+
+
+async def _async_announce_then_refresh(
+    coordinator: InsiteEnergyDataUpdateCoordinator,
+    refresh: bool,
+) -> None:
+    """Re-announce the cached reading, then fetch a newer one.
+
+    The energy dashboard's cost sensor accrues nothing on the first meter event
+    it sees: it takes that reading as its baseline and returns. It only ever
+    initialises from a state_changed event, and our entities are created before
+    it registers its listener, so left alone the first event it sees is a real
+    meter increment - and that day's cost is silently lost.
+
+    Waiting for startup to finish and re-announcing the cached reading gives it
+    a harmless baseline instead. Doing that strictly *before* the refresh is
+    what makes the meter moving while HA was down work: the newer reading then
+    arrives as a genuine delta and gets charged, rather than being swallowed.
+    """
+    coordinator.async_reannounce()
+
+    if refresh:
+        await _async_startup_refresh(coordinator)
 
 
 async def _async_startup_refresh(

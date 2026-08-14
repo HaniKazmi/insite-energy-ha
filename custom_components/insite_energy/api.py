@@ -24,6 +24,25 @@ _TOKEN_RE = re.compile(
     r'name="__RequestVerificationToken"[^>]*?value="(.*?)"', re.DOTALL
 )
 
+# A failed login re-renders the login page, and so do several things that are
+# nothing to do with the password. Telling them apart matters more than the
+# wording suggests: an auth error raises ConfigEntryAuthFailed, and the
+# coordinator does not schedule another poll after one of those, so a lockout
+# misread as a bad password stops polling until the user re-enters a password
+# that was always correct.
+#
+# Only the cases below are reclassified. Anything else landing back on the login
+# page is still treated as bad credentials, so a genuinely wrong password
+# prompts for reauth exactly as before.
+_TRANSIENT_LOGIN_RE = re.compile(
+    r"locked\s*out"
+    r"|too many (?:failed |unsuccessful )?(?:login )?attempts"
+    r"|try again (?:later|in a)"
+    r"|temporarily (?:unavailable|disabled|suspended)"
+    r"|under maintenance|scheduled maintenance",
+    re.IGNORECASE,
+)
+
 
 class InsiteClient:
     """Client for the Insite Energy customer portal.
@@ -128,6 +147,12 @@ class InsiteClient:
             # Bad credentials re-render the login page; success lands on the
             # details page. Anything else is a site problem, not a bad password.
             if _is_path(response, LOGIN_PATH):
+                body = await response.text()
+                if (transient := _TRANSIENT_LOGIN_RE.search(body)) is not None:
+                    raise InsiteApiError(
+                        "Login refused for a reason other than the password "
+                        f"({transient.group(0)!r}); will retry"
+                    )
                 raise InsiteAuthError("Invalid username or password")
             if not _is_path(response, DETAILS_PATH):
                 raise InsiteApiError(

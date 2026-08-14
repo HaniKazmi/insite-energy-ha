@@ -107,8 +107,12 @@ async def test_warm_call_skips_the_login(session, view_model):
     old code failed outright on the second poll.
     """
     queue_successful_login(session, view_model)
-    session.add("GET", DETAILS_URL, FakeResponse(DETAILS_URL, body=details_page(view_model)))
-    session.add("GET", DETAILS_URL, FakeResponse(DETAILS_URL, body=details_page(view_model)))
+    session.add(
+        "GET", DETAILS_URL, FakeResponse(DETAILS_URL, body=details_page(view_model))
+    )
+    session.add(
+        "GET", DETAILS_URL, FakeResponse(DETAILS_URL, body=details_page(view_model))
+    )
 
     client = InsiteClient(session, "user@example.com", "pw")
     await client.async_get_data()

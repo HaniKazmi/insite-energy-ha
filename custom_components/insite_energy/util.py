@@ -1,9 +1,9 @@
 """Shared helpers for Insite Energy."""
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import re
 
 # Matches the first signed number in a string, e.g. "14.67p" or "-1.2p".
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")

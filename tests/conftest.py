@@ -4,8 +4,8 @@ from __future__ import annotations
 import copy
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.insite_energy.const import DOMAIN

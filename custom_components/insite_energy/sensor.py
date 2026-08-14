@@ -4,13 +4,13 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.sensor import (
-    SensorEntity,
     SensorDeviceClass,
+    SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, EntityCategory
-from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory, UnitOfEnergy
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -178,10 +178,16 @@ class InsiteAccountBalanceSensor(InsiteAccountEntity, SensorEntity):
         """Return the state."""
         if self.coordinator.data:
             balance_str = self.coordinator.data.get("CreditAccountBalance")
-            if balance_str:
+            # `is not None`, not truthiness: a settled account reporting a bare
+            # 0 would otherwise show as unknown rather than zero. TypeError
+            # comes along because float() raises that, not ValueError, if the
+            # portal ever nests the value in a dict or list - and an exception
+            # escaping here leaves the entity frozen on its last value while
+            # still reporting itself available.
+            if balance_str is not None:
                 try:
                     return float(balance_str)
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
         return None
 
@@ -237,10 +243,13 @@ class InsiteUtilityReadingSensor(InsiteUtilityEntity, SensorEntity):
     def native_value(self):
         """Return the state."""
         data = self._get_utility_data()
-        if data and data.get("LastMeterReading"):
+        # See InsiteAccountBalanceSensor: a newly commissioned meter genuinely
+        # reads 0, and float() raises TypeError rather than ValueError on a
+        # non-scalar.
+        if data and data.get("LastMeterReading") is not None:
             try:
                 return float(data["LastMeterReading"])
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
         return None
 

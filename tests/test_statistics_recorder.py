@@ -17,15 +17,15 @@ from datetime import timedelta
 from functools import partial
 from unittest.mock import patch
 
-import pytest
-from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.models import StatisticMeanType
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_metadata,
     statistics_during_period,
 )
 from homeassistant.util import dt as dt_util
+import pytest
 from pytest_homeassistant_custom_component.components.recorder.common import (
     async_wait_recording_done,
 )
@@ -88,7 +88,7 @@ async def test_real_recorder_weights_are_read_in_the_right_unit(hass):
             {"co": "test:activity"},
         )
 
-    rows = dict((m["statistic_id"], r) for m, r in captured)[statistic_id("co", "energy")]
+    rows = {m["statistic_id"]: r for m, r in captured}[statistic_id("co", "energy")]
     per_hour = [r["state"] for r in rows]
 
     assert len(per_hour) == 4
@@ -186,7 +186,7 @@ async def test_a_weight_source_with_no_prior_history_does_not_hijack_the_spread(
             {"co": "test:meter"},
         )
 
-    rows = dict((m["statistic_id"], r) for m, r in captured)[statistic_id("co", "energy")]
+    rows = {m["statistic_id"]: r for m, r in captured}[statistic_id("co", "energy")]
     per_hour, prev = [], 0.0
     for row in rows:
         per_hour.append(row["sum"] - prev)
@@ -198,3 +198,75 @@ async def test_a_weight_source_with_no_prior_history_does_not_hijack_the_spread(
     assert per_hour == pytest.approx([0.0, 0.0, 10.0 / 3, 20.0 / 3])
     # Before the fix this was [0, 10, ~0, ~0]: everything on the bogus hour.
     assert per_hour[1] < 1.0
+
+
+async def test_a_meter_idle_at_zero_keeps_the_hour_it_finally_moves(hass):
+    """The mirror of the test above, and the case the old check got wrong.
+
+    `change == sum` was used to mean "recorder had no earlier row to difference
+    against". It does not: recorder does `prev_sums.get(id) or 0`, so a real
+    earlier row whose sum is exactly 0.0 is indistinguishable from no row at
+    all. A cumulative meter that simply had not moved yet - away for the summer,
+    or a utility_meter fresh from its cycle reset - sits at sum 0.0 for every
+    row, so the first hour it *does* move satisfies `change == sum` and used to
+    be discarded. That was the only hour with any activity in it, so the whole
+    window silently fell back to a flat spread.
+
+    Only a real recorder can show this, because the bug is in what recorder
+    returns rather than in the arithmetic done afterwards.
+    """
+    start = dt_util.as_utc(
+        parse_reading_date("2026/07/04 00:00", dt_util.DEFAULT_TIME_ZONE)
+    )
+
+    async_add_external_statistics(
+        hass,
+        {
+            "has_sum": True,
+            "mean_type": StatisticMeanType.NONE,
+            "name": "Test Meter",
+            "source": "test",
+            "statistic_id": "test:idle_meter",
+            "unit_of_measurement": "L",
+            "unit_class": None,
+        },
+        [
+            # Genuine history, all of it flat at zero: the meter was installed
+            # and recording, it just never ran.
+            {"start": start - timedelta(hours=3), "sum": 0.0},
+            {"start": start - timedelta(hours=2), "sum": 0.0},
+            {"start": start - timedelta(hours=1), "sum": 0.0},
+            # ...and then it runs, in the window's first hour.
+            {"start": start, "sum": 30.0},
+            {"start": start + timedelta(hours=1), "sum": 30.0},
+            {"start": start + timedelta(hours=2), "sum": 30.0},
+            {"start": start + timedelta(hours=3), "sum": 30.0},
+        ],
+    )
+    await async_wait_recording_done(hass)
+
+    captured: list[tuple[dict, list]] = []
+    with patch(
+        "custom_components.insite_energy.statistics.async_add_external_statistics",
+        lambda _h, metadata, rows: captured.append((metadata, rows)),
+    ):
+        await async_publish_spread_statistics(
+            hass,
+            payload("100.0", "2026/07/04 00:00"),
+            payload("110.0", "2026/07/04 04:00"),
+            {"co": "test:idle_meter"},
+        )
+
+    rows = {m["statistic_id"]: r for m, r in captured}[statistic_id("co", "energy")]
+    per_hour, prev = [], 0.0
+    for row in rows:
+        per_hour.append(row["sum"] - prev)
+        prev = row["sum"]
+
+    assert sum(per_hour) == pytest.approx(10.0)
+    # The one hour the meter ran takes all of it.
+    assert per_hour == pytest.approx([10.0, 0.0, 0.0, 0.0])
+    # Before the fix this was a flat [2.5, 2.5, 2.5, 2.5]: the only weighted
+    # hour was thrown away, total_weight fell to zero, and the spread gave up
+    # and went even - logging "evenly", as though nothing was configured.
+    assert per_hour[0] > 9.0

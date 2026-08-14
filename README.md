@@ -33,8 +33,8 @@ The integration automatically creates devices for your Account and each Utility 
 ### Utility Devices (e.g., Heating & Hot Water)
 For each utility listed on your account, a separate device is created with the following sensors:
 - **Meter Reading**: The latest meter reading in kWh.
-- **Rate**: Your current unit rate, in GBP/kWh. The portal quotes this in pence, so `14.67p` appears here as `0.1467`.
-- **Standing Charge**: The daily standing charge, in GBP/day, converted the same way.
+- **Rate**: Your current unit rate, in GBP/kWh. The portal quotes this in pence, so `14.67p` appears here as `0.1467`. Recorded as a measurement, so long-term statistics keep its min/mean/max — useful for seeing when your tariff changed.
+- **Standing Charge**: The daily standing charge, in GBP/day, converted and recorded the same way.
 - **Last Reading Date**: A timestamp for when your meter was last read.
 - **Meter Serial Number** (Diagnostic): The serial number of the utility meter.
 
@@ -83,13 +83,24 @@ Pick one statistic per utility under **Configure**. The picker lists what the re
 
 Both kinds work: a `measurement` statistic contributes its hourly mean, a cumulative one contributes the rise across each hour — so a meter can be used directly, which is more accurate than its flow sensor.
 
-The picker cannot be filtered, so it also offers this integration's own `insite_energy:<utility>_energy` and `_cost` statistics. **Do not pick those.** Weighting a utility by what was published for it would make each spread a copy of the last one's shape, drifting further from reality every time. The integration refuses them and spreads evenly instead, with a warning in the log, but it is easier not to choose them.
+The picker cannot be filtered, so it also offers this integration's own output — both the `insite_energy:<utility>_energy` and `_cost` statistics, and the **Meter Reading** sensors it creates. **Do not pick those.** Weighting a utility by what was published for it would make each spread a copy of the last one's shape, drifting further from reality every time; weighting it by its own meter reading is worse still, since that series is flat except for the single hour a reading arrived, which is exactly the spike this feature exists to remove. The integration refuses both and spreads evenly instead, with a warning in the log, but it is easier not to choose them.
 
 One sensor per utility is deliberate. If the signal is a combination — hot water *and* space heating, say — build a template sensor that expresses it, which it can do far better than any list of weights this integration could offer.
 
 Two things worth knowing. The signal must be a **sensor, not a binary_sensor**: state history is purged after ten days, but long-term statistics are kept forever, and a monthly reading needs weights from weeks ago. And hours with no recorded activity weigh nothing, so they receive no energy — their share moves to the hours that were active. If nothing at all is recorded for the whole period, the reading is spread evenly instead.
 
-Weighting only ever changes *where* the energy lands. The published rows always sum to exactly the meter delta.
+Weighting only ever changes *where* the energy lands. The published rows always sum to the meter delta.
+
+### When a reading isn't published
+
+A few situations are refused rather than guessed at, because publishing the wrong thing here is worse than publishing nothing — a statistic is awkward to correct once it's written. Each of these logs a warning explaining which one fired:
+
+- The meter went **backwards**, which would otherwise record negative consumption.
+- The reading is **dated in the future**, so the period it claims to cover hasn't happened.
+- The window is **longer than 400 days**, which means a bad date rather than a real gap.
+- The window **overlaps hours already published**. This one loses the consumption after the overlap, and says so — it needs correcting by hand if it matters.
+
+The first reading after installing also publishes nothing: there's no previous reading yet to measure a period against. The one after it covers the gap.
 
 ## Development
 

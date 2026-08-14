@@ -7,24 +7,41 @@ checks the rows still sum to the meter delta.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from itertools import pairwise
 import re
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
-import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
+import pytest
 
+from custom_components.insite_energy.const import DOMAIN
 from custom_components.insite_energy.statistics import (
+    WEIGHT_HISTORY_LOOKBACK,
     async_publish_spread_statistics,
     statistic_id,
 )
-
 from custom_components.insite_energy.util import parse_reading_date
 
 # The real cooling case: a month between readings, 231.3 kWh in one lump.
 JULY = "2026/07/04 00:00"
 AUGUST = "2026/08/04 00:00"
+SEPTEMBER = "2026/09/04 00:00"
 HOURS_IN_WINDOW = 744
+
+
+@pytest.fixture(autouse=True)
+def _pin_now(freezer):
+    """Pin the clock past every reading date used below.
+
+    The windows here are fixed calendar dates, and a reading dated in the future
+    is refused outright, so without this the file quietly starts failing once
+    real time walks past them - as a wrong-guard-fired error, nowhere near the
+    real cause. Must stay ahead of the latest date used anywhere below, which is
+    the October DST window rather than SEPTEMBER.
+    """
+    freezer.move_to("2026-12-01 00:00:00+00:00")
 
 
 def window_start() -> datetime:
@@ -255,10 +272,13 @@ async def test_cumulative_sources_use_the_per_hour_change(hass):
     assert energy[0] / energy[1] == pytest.approx(1 / 3)
 
 
-async def test_the_window_is_not_widened_for_cumulative_sources(hass):
-    """Recorder seeds `change` itself, so we must ask only for our own hours.
+async def test_the_window_end_is_not_widened_for_cumulative_sources(hass):
+    """The end must cover exactly our hours; the start deliberately reaches back.
 
-    Widening the query would silently pull in an extra hour of weight.
+    Widening the end would pull an extra hour of real activity into the split.
+    Widening the start cannot: those rows are only read to see whether the
+    source had any history before the window, which is what separates "recorder
+    had no baseline" from "the baseline was legitimately zero".
     """
     seen: dict[str, datetime] = {}
 
@@ -284,10 +304,10 @@ async def test_the_window_is_not_widened_for_cumulative_sources(hass):
             {"co": "sensor.water"},
         )
 
-    assert seen["start"] == window_start()
     # The end is the real subject: widening it pulls an extra hour of activity
     # into the weights and shifts the split.
     assert seen["end"] == window_start() + timedelta(hours=HOURS_IN_WINDOW)
+    assert seen["start"] == window_start() - WEIGHT_HISTORY_LOOKBACK
     assert seen["period"] == "hour"
     assert "change" in seen["types"]
 
@@ -345,7 +365,7 @@ async def test_published_sums_never_go_backwards(hass):
     assert rows, "nothing was published, so this would assert nothing"
     for stat_id, published in rows.items():
         sums = [r["sum"] for r in published]
-        assert all(b >= a for a, b in zip(sums, sums[1:])), f"{stat_id} sum decreased"
+        assert all(b >= a for a, b in pairwise(sums)), f"{stat_id} sum decreased"
         # And nothing carrying float noise below what a meter could resolve.
         assert all(s == round(s, 6) for s in sums), f"{stat_id} has unrounded sums"
 
@@ -478,7 +498,7 @@ async def test_a_partially_overlapping_window_is_refused_loudly(hass, caplog):
     second = await publish(
         hass,
         payload("273.3", JULY),
-        payload("600.0", "2026/09/04 00:00"),
+        payload("600.0", SEPTEMBER),
         last_sums={statistic_id("co", "energy"): (231.3, midway)},
     )
 
@@ -566,3 +586,156 @@ async def test_cost_follows_the_weighted_shape_not_a_flat_one(hass):
     assert cost == pytest.approx([v * 0.1467 for v in energy])
     # And the weighting really is present on both, not flat.
     assert cost[0] / cost[1] == pytest.approx(3.0)
+
+
+# --- Window alignment --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "third"),
+    [
+        # Minutes the portal could plausibly start reporting.
+        ("2026/06/04 00:30", "2026/07/04 00:30", "2026/08/04 00:30"),
+        # Midnight, but a second that pushes the instant off the hour.
+        ("2026/06/04 00:00", "2026/07/04 00:00", "2026/08/04 00:00"),
+    ],
+)
+async def test_consecutive_windows_never_share_an_hour(hass, first, second, third):
+    """Window N's last row must not also be window N+1's first row.
+
+    Flooring only the start of a window made the bucket containing its end
+    belong to both it and its successor, whenever the reading's UTC instant was
+    not hour-aligned. The already-published guard reads that shared row as a
+    partial overlap and refuses the whole window, so every other reading was
+    dropped - permanently, and with a warning blaming double counting.
+    """
+    window_a = await publish(hass, payload("100.0", first), payload("200.0", second))
+    rows_a = window_a[statistic_id("co", "energy")]
+    last_start = rows_a[-1]["start"].timestamp()
+
+    window_b = await publish(
+        hass,
+        payload("200.0", second),
+        payload("300.0", third),
+        last_sums={statistic_id("co", "energy"): (100.0, last_start)},
+    )
+
+    rows_b = window_b[statistic_id("co", "energy")]
+    assert rows_b, "the second window was refused as an overlap"
+    assert rows_b[0]["start"] > rows_a[-1]["start"]
+    assert rows_b[0]["start"] - rows_a[-1]["start"] == timedelta(hours=1)
+    # And the delta still lands in full.
+    assert sum(r["state"] for r in rows_b) == pytest.approx(100.0)
+
+
+async def test_a_reading_dated_in_the_future_is_refused(hass, caplog):
+    """A future date would write consumption for hours that have not happened.
+
+    Worse than the phantom rows: every later poll is then refused, first as an
+    older date and then as an already-published window, both at debug level - so
+    the utility goes silent with nothing to show why.
+    """
+    result = await publish(
+        hass, payload("100.0", AUGUST), payload("200.0", "2026/12/25 00:00")
+    )
+
+    assert result == {}
+    assert "is in the future" in caplog.text
+    assert_no_swallowed_failure(caplog)
+
+
+async def test_our_own_meter_reading_entity_is_refused_as_a_weight(hass, caplog):
+    """The picker offers our meter reading sensor, and it is the worst choice.
+
+    That series is flat except for the hour a reading landed, so weighting by it
+    would collapse the whole month onto that hour - exactly the spike this
+    module exists to remove.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    entity = er.async_get(hass).async_get_or_create(
+        "sensor", DOMAIN, "co_reading", suggested_object_id="cooling_meter_reading"
+    )
+
+    result = await publish(
+        hass,
+        payload("273.3", JULY),
+        payload("504.6", AUGUST),
+        weights={"co": entity.entity_id},
+        # All of it on one hour, which is what the real series looks like.
+        series={entity.entity_id: [{"start": window_start().timestamp(), "mean": 500.0}]},
+    )
+
+    rows = result[statistic_id("co", "energy")]
+    assert "this integration's own output" in caplog.text
+    # Refused, so spread evenly rather than collapsed onto hour zero.
+    spread = amounts(rows)
+    assert spread[0] == pytest.approx(spread[-1])
+    assert sum(spread) == pytest.approx(231.3)
+
+
+# --- Daylight saving ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected", "label"),
+    [
+        # BST starts 29 March 2026: the local day is 23 hours long.
+        ("2026/03/28 00:00", "2026/03/30 00:00", 47, "spring forward"),
+        # BST ends 25 October 2026: 25 hours.
+        ("2026/10/24 00:00", "2026/10/26 00:00", 49, "fall back"),
+        ("2026/05/04 00:00", "2026/05/06 00:00", 48, "no transition"),
+    ],
+)
+async def test_a_window_covers_the_hours_that_really_elapsed(
+    hass, first, second, expected, label
+):
+    """Two local midnights are not always 48 hours apart.
+
+    The spread has to follow real elapsed time, not wall-clock arithmetic, or a
+    DST window either invents an hour of consumption or loses one. This is a
+    UK-only integration, so Europe/London is the case that matters - and the
+    suite otherwise runs under a zone whose transitions fall on different dates,
+    with fixtures that straddle none of them.
+    """
+    tz = ZoneInfo("Europe/London")
+    with patch.object(dt_util, "DEFAULT_TIME_ZONE", tz):
+        rows = await publish(
+            hass, payload("100.0", first), payload("200.0", second)
+        )
+
+    energy = rows[statistic_id("co", "energy")]
+    assert len(energy) == expected, label
+    # Every row an hour apart in real time, across the transition too.
+    for earlier, later in pairwise(energy):
+        assert later["start"] - earlier["start"] == timedelta(hours=1)
+    # And the delta is neither inflated nor lost by the missing/extra hour.
+    assert sum(amounts(energy)) == pytest.approx(100.0)
+    assert energy[-1]["sum"] == pytest.approx(100.0)
+
+
+async def test_dst_windows_still_do_not_share_an_hour(hass):
+    """The window either side of a transition must abut, not overlap."""
+    tz = ZoneInfo("Europe/London")
+    with patch.object(dt_util, "DEFAULT_TIME_ZONE", tz):
+        before = await publish(
+            hass,
+            payload("100.0", "2026/10/24 00:00"),
+            payload("200.0", "2026/10/26 00:00"),
+        )
+        rows_before = before[statistic_id("co", "energy")]
+        after = await publish(
+            hass,
+            payload("200.0", "2026/10/26 00:00"),
+            payload("300.0", "2026/10/28 00:00"),
+            last_sums={
+                statistic_id("co", "energy"): (
+                    100.0,
+                    rows_before[-1]["start"].timestamp(),
+                )
+            },
+        )
+
+    rows_after = after[statistic_id("co", "energy")]
+    assert rows_after, "the window after the transition was refused as an overlap"
+    assert rows_after[0]["start"] - rows_before[-1]["start"] == timedelta(hours=1)

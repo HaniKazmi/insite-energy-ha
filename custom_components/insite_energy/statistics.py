@@ -35,6 +35,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, STAT_COST_SUFFIX, STAT_ENERGY_SUFFIX
@@ -46,6 +47,12 @@ _LOGGER = logging.getLogger(__name__)
 # cache is stale or a reading date is wrong rather than a genuine gap. Emitting
 # a year of hourly rows on a bad date would be slow and hard to undo.
 MAX_WINDOW_HOURS = 24 * 400
+
+# How far before a window to look for any sign the weight source already had
+# statistics. Only its presence is read, never its values, so this only has to
+# outlast a plausible gap - Home Assistant down for a few days - rather than
+# reach back to the source's first ever row.
+WEIGHT_HISTORY_LOOKBACK = timedelta(days=7)
 
 
 def statistic_id(key: str, suffix: str) -> str:
@@ -65,15 +72,87 @@ def statistic_id(key: str, suffix: str) -> str:
     return f"{DOMAIN}:{slug or 'unknown'}_{suffix}"
 
 
+def _floor_hour(value: datetime) -> datetime:
+    """Return the start of the hour `value` falls in."""
+    return value.replace(minute=0, second=0, microsecond=0)
+
+
 def _hours_between(start: datetime, end: datetime) -> list[datetime]:
-    """Return every hour boundary in [start, end)."""
+    """Return every hour boundary in [start, end), both ends snapped to the hour.
+
+    Both ends are floored, not just the start. An hour has to belong to exactly
+    one window: flooring only the start makes the bucket containing `end` the
+    last row of this window *and* the first row of the next one, whenever a
+    reading's UTC instant is not hour-aligned - either because the portal
+    reported a real clock time rather than midnight, or because the local zone's
+    offset is not a whole number of hours. The already-published guard below
+    reads that shared row as a partial overlap and refuses the whole window, so
+    every other reading is silently dropped and never retried.
+
+    Snapping both keeps consecutive windows contiguous with no shared row and no
+    gap. The cost is that the first and last partial hours of a window are
+    attributed to the hour they start in, which is at most 59 minutes of skew on
+    a window that is usually weeks long.
+    """
     hours: list[datetime] = []
-    current = dt_util.as_utc(start).replace(minute=0, second=0, microsecond=0)
-    limit = dt_util.as_utc(end)
+    current = _floor_hour(dt_util.as_utc(start))
+    limit = _floor_hour(dt_util.as_utc(end))
     while current < limit:
         hours.append(current)
         current += timedelta(hours=1)
     return hours
+
+
+def _suspect_hour(rows: list[dict], window_start: datetime) -> datetime | None:
+    """The hour whose `change` is a lifetime total, not an hourly rise - if any.
+
+    Recorder derives `change` by differencing sums against the last row strictly
+    before the window. When there is no such row it seeds from zero, so that
+    first `change` is the source's whole running total. An externally imported
+    meter reading tens of thousands high would weigh its first hour by that,
+    against neighbours weighing single digits, and collapse the entire spread
+    onto it.
+
+    The obvious test - `change == sum` - is not that condition. Recorder does
+    `prev_sum = prev_sums.get(statistic_id) or 0`, so "no earlier row" and "an
+    earlier row whose sum is exactly 0.0" produce byte-identical output. A
+    cumulative meter that simply had not moved yet - away for the summer, a
+    utility_meter just after its cycle reset - sits at sum 0.0 for every row, so
+    the first hour it *does* move satisfies `change == sum` and would be thrown
+    away. That is the one hour that mattered, and if it was the only active hour
+    the whole window silently falls back to a flat spread.
+
+    Widening the query does not disambiguate it either: recorder looks the
+    baseline up separately from the requested window, so it already had that row.
+    What does work is asking the question directly - `rows` now reaches back
+    before the window (see WEIGHT_HISTORY_LOOKBACK), so an earlier row being
+    present is proof recorder had something real to difference against, whatever
+    its sum happened to be.
+    """
+    if any(dt_util.utc_from_timestamp(r["start"]) < window_start for r in rows):
+        return None
+
+    # No history within the lookback, so a first row equal to its own sum really
+    # is a running total rather than an hour's worth.
+    earliest = min(
+        (r for r in rows if r.get("change") is not None),
+        key=lambda r: r["start"],
+        default=None,
+    )
+    if (
+        earliest is None
+        or earliest.get("sum") is None
+        or float(earliest["change"]) != float(earliest["sum"])
+    ):
+        return None
+
+    suspect = _floor_hour(dt_util.utc_from_timestamp(earliest["start"]))
+    _LOGGER.debug(
+        "Weight source has no history before %s; ignoring that hour rather than "
+        "treating a lifetime total as an hourly rise",
+        suspect.isoformat(),
+    )
+    return suspect
 
 
 def _series_to_weights(rows: list[dict], hours: list[datetime]) -> list[float]:
@@ -94,37 +173,36 @@ def _series_to_weights(rows: list[dict], hours: list[datetime]) -> list[float]:
         # which fixes the unit. Only the websocket API scales to milliseconds, for
         # the frontend - reading these as ms lands every hour in 1970, matches
         # nothing, and silently zeroes every weight.
-        start = dt_util.utc_from_timestamp(row["start"])
-        by_hour[start.replace(minute=0, second=0, microsecond=0)] = row
+        by_hour[_floor_hour(dt_util.utc_from_timestamp(row["start"]))] = row
 
     if any(row.get("mean") is not None for row in rows):
         return [max(0.0, float((by_hour.get(h) or {}).get("mean") or 0.0)) for h in hours]
 
-    # Recorder derives `change` by differencing sums, seeding from the last row
-    # *strictly before* the window - but when there is no such row it seeds from
-    # zero, so the earliest row's change is its whole lifetime total rather than
-    # an hour's rise. A meter installed mid-window would otherwise weigh its
-    # first hour by tens of thousands and collapse the entire spread onto it.
-    # `change == sum` is that signature; discarding one hour is the safe read.
-    earliest = min((r for r in rows if r.get("change") is not None),
-                   key=lambda r: r["start"], default=None)
-    suspect = None
-    if earliest is not None and earliest.get("sum") is not None:
-        if float(earliest["change"]) == float(earliest["sum"]):
-            suspect = dt_util.utc_from_timestamp(earliest["start"]).replace(
-                minute=0, second=0, microsecond=0
-            )
-            _LOGGER.debug(
-                "Weight source has no history before %s; ignoring that hour "
-                "rather than treating a lifetime total as an hourly rise",
-                suspect.isoformat(),
-            )
+    suspect = _suspect_hour(rows, hours[0])
 
     return [
         0.0 if h == suspect
         else max(0.0, float((by_hour.get(h) or {}).get("change") or 0.0))
         for h in hours
     ]
+
+
+def _is_own_output(hass: HomeAssistant, source: str) -> bool:
+    """Whether a weight source is something this integration published.
+
+    Two spellings have to be caught, and the prefix only covers one. The
+    external statistics written below are `insite_energy:...`, but the meter
+    reading entity is TOTAL_INCREASING, so it has long-term statistics of its
+    own under `sensor....` - which the picker also offers. Weighting a utility
+    by its own meter reading is the worst case of all: that series is flat
+    except for the single hour the reading landed, so the whole delta collapses
+    onto that hour - reproducing exactly the spike this module exists to remove,
+    while reporting itself as "weighted by activity".
+    """
+    if source.startswith(f"{DOMAIN}:"):
+        return True
+    entity = er.async_get(hass).async_get(source)
+    return entity is not None and entity.platform == DOMAIN
 
 
 async def _async_weights(
@@ -141,7 +219,7 @@ async def _async_weights(
     if not source:
         return [0.0] * len(hours)
 
-    if source.startswith(f"{DOMAIN}:"):
+    if _is_own_output(hass, source):
         # Weighting a utility by its own published output would make each spread
         # a copy of the last one's shape, drifting further from reality every
         # time and never saying so. The statistic picker cannot exclude ids, so
@@ -156,15 +234,17 @@ async def _async_weights(
     rows = await get_instance(hass).async_add_executor_job(
         statistics_during_period,
         hass,
-        hours[0],
+        hours[0] - WEIGHT_HISTORY_LOOKBACK,
         hours[-1] + timedelta(hours=1),
         {source},
         "hour",
         None,
-        # "change" is recorder differencing a cumulative sum for us, so this
-        # window needs no widening. "sum" comes along to spot the one case
-        # where recorder had no baseline to difference against - see
-        # _series_to_weights.
+        # The *end* is never widened: an extra hour of activity there would pull
+        # real weight into the split. The start is, and only to see whether any
+        # row exists before the window - that is the one thing that separates
+        # "recorder had no baseline" from "the baseline was legitimately zero".
+        # It does not change the `change` values within the window, because
+        # recorder looks its baseline up independently of what we ask for.
         {"mean", "change", "sum"},
     )
     series = _series_to_weights(rows.get(source, []), hours)
@@ -217,7 +297,7 @@ def _rows(hours: list[datetime], values: list[float], base: float) -> list[Stati
     """
     rows: list[StatisticData] = []
     total = base
-    for hour, value in zip(hours, values):
+    for hour, value in zip(hours, values, strict=True):
         total += value
         rows.append(StatisticData(start=hour, state=value, sum=round(total, 6)))
     return rows
@@ -283,9 +363,11 @@ async def async_publish_spread_statistics(
                 continue
             try:
                 await _async_publish_one(hass, key, was, utility, weight_config.get(key))
-            except Exception:  # noqa: BLE001 - one bad utility must not stop the rest
+            # Deliberately blind: one malformed utility must not stop the rest.
+            except Exception:
                 _LOGGER.exception("Failed to publish spread statistics for %s", key)
-    except Exception:  # noqa: BLE001
+    # Deliberately blind: statistics are a bonus, and must never cost a poll.
+    except Exception:
         _LOGGER.exception("Failed to publish spread statistics")
 
 
@@ -343,6 +425,22 @@ async def _async_publish_one(
         )
         return
 
+    # The span check bounds how long a window is, never where it ends, so a
+    # reading dated a year out still passes it. Publishing that would write a
+    # year of consumption into hours that have not happened, and every later
+    # poll would then be refused - first as an older date, then as an
+    # already-published window - leaving the utility silent until real time
+    # caught up. Both of those refusals are debug-level, so it would look like
+    # nothing was wrong.
+    if date > dt_util.utcnow():
+        _LOGGER.warning(
+            "%s reading is dated %s, which is in the future; skipping rather "
+            "than publishing consumption for hours that have not happened",
+            name,
+            date.isoformat(),
+        )
+        return
+
     hours = _hours_between(was_date, date)
     if not hours:
         return
@@ -370,11 +468,10 @@ async def _async_publish_one(
         _last_sums, hass, wanted
     )
 
-    # Republishing a window would count the period twice, and the cached
-    # snapshot this window is derived from can outlive the publish that used it:
-    # a reload within CACHE_SAVE_DELAY of a poll leaves the new coordinator
-    # reading the stale reading off disk. Energy is the authority; cost may
-    # legitimately lag it when a rate was missing on an earlier run.
+    # Republishing a window would count the period twice, which a restored
+    # database, a hand correction or a snapshot older than the last publish can
+    # all lead to. Energy is the authority; cost may legitimately lag it when a
+    # rate was missing on an earlier run.
     last_start = bases[energy_id].start
     if last_start is not None and hours[0].timestamp() <= last_start:
         if hours[-1].timestamp() <= last_start:

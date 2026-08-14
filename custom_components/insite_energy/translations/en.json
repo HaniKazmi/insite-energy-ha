@@ -24,14 +24,15 @@
     },
     "abort": {
       "already_configured": "Account is already configured",
-      "reauth_successful": "Re-authentication was successful"
+      "reauth_successful": "Re-authentication was successful",
+      "single_instance_allowed": "Only one Insite Energy account can be configured"
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Configure Insite Energy",
-        "description": "Adjust integration settings. Each discovered utility ({utilities}) gets its own weight field: pick a statistic whose activity that utility's readings should follow, or leave it blank to spread each reading evenly across the period it covers. Do not pick this integration's own insite_energy statistics.",
+        "description": "Adjust integration settings. Each discovered utility gets its own weight field ({utilities}): pick a statistic whose activity that utility's readings should follow, or leave it blank to spread each reading evenly across the period it covers. Do not pick this integration's own insite_energy statistics, or the meter reading sensors this integration creates.",
         "data": {
           "username": "Email",
           "password": "Password (leave blank to keep the current one)",

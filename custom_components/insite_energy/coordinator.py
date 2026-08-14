@@ -5,19 +5,18 @@ from datetime import timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.json import JSONEncoder
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .api import InsiteApiError, InsiteAuthError, InsiteClient
 from .const import (
     CACHE_ACCOUNT_KEY,
-    CACHE_SAVE_DELAY,
     CONF_UPDATE_INTERVAL,
     CONF_WEIGHTS,
     DEFAULT_UPDATE_INTERVAL,
@@ -106,7 +105,9 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         """
         try:
             cached = await self._store.async_load()
-        except Exception:  # noqa: BLE001 - a bad cache must never block setup
+        # Deliberately blind: a corrupt or unreadable cache must never block
+        # setup, since the whole point of it is to be optional.
+        except Exception:
             _LOGGER.exception("Failed to load cached data, will fetch instead")
             return False
 
@@ -142,7 +143,13 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
 
         view_model[LAST_POLL_KEY] = dt_util.utcnow()
         view_model[CACHE_ACCOUNT_KEY] = self.username
-        self._store.async_delay_save(lambda: view_model, CACHE_SAVE_DELAY)
+        # Written now rather than on a debounce. A delayed write outlives the
+        # thing that scheduled it: deleting the entry removes the file and the
+        # pending write puts it straight back, orphaned, and a reload inside the
+        # delay leaves the new coordinator reading the previous poll off disk -
+        # which then derives a window overlapping one already published, and
+        # gets refused. Polls are hours apart, so there is nothing to debounce.
+        await self._store.async_save(view_model)
 
         # self.data is still the previous snapshot here, which is what tells us
         # the period this reading covers. Failures are handled in there, so the

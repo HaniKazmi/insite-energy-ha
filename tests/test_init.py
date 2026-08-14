@@ -19,15 +19,10 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.insite_energy import INITIAL_RETRY_DELAYS, _async_startup_refresh
 from custom_components.insite_energy.api import InsiteApiError
-from custom_components.insite_energy import (
-    INITIAL_RETRY_DELAYS,
-    _async_startup_refresh,
-)
-from custom_components.insite_energy.const import CACHE_SAVE_DELAY, CONF_WEIGHTS, DOMAIN
-from custom_components.insite_energy.coordinator import (
-    InsiteEnergyDataUpdateCoordinator,
-)
+from custom_components.insite_energy.const import CONF_WEIGHTS, DOMAIN
+from custom_components.insite_energy.coordinator import InsiteEnergyDataUpdateCoordinator
 
 from .conftest import USERNAME
 
@@ -101,10 +96,12 @@ async def test_reload_keeps_identifiers_stable(hass, config_entry, mock_client):
 
 
 async def flush_cache_write(hass: HomeAssistant) -> None:
-    """Let the debounced Store write land."""
-    async_fire_time_changed(
-        hass, dt_util.utcnow() + timedelta(seconds=CACHE_SAVE_DELAY + 1)
-    )
+    """Settle the cache write.
+
+    The store is written during the poll now rather than on a debounce, so this
+    only has to let the poll finish. Kept as a named helper because the tests
+    below read better for saying what they are waiting on.
+    """
     await hass.async_block_till_done()
 
 
@@ -275,10 +272,18 @@ async def test_startup_refresh_retries_other_failures():
     coordinator.last_update_success = False
     coordinator.last_exception = InsiteApiError("site down")
 
-    with patch("custom_components.insite_energy.asyncio.sleep", AsyncMock()):
+    with patch(
+        "custom_components.insite_energy.asyncio.sleep", AsyncMock()
+    ) as sleep:
         await _async_startup_refresh(coordinator)
 
-    assert coordinator.async_refresh.await_count == 1 + len(INITIAL_RETRY_DELAYS)
+    # Hardcoded, not `1 + len(INITIAL_RETRY_DELAYS)`: deriving the expected
+    # count from the very constant the code iterates means emptying that tuple
+    # deletes the retry ladder and leaves this test green.
+    assert coordinator.async_refresh.await_count == 4
+    # And the ladder is the policy, so pin the delays rather than just the count.
+    assert [call.args[0] for call in sleep.await_args_list] == [60, 300, 900]
+    assert INITIAL_RETRY_DELAYS == (60, 300, 900)
 
 
 # --- Startup re-announcement -------------------------------------------------
@@ -309,7 +314,11 @@ async def restart_with_reading(
     for utility in payload["UtilityDetails"]:
         if utility["ShortName"] == "HH":
             utility["LastMeterReading"] = reading
-    mock_client.async_get_data.side_effect = None
+    # Only `return_value`. Clearing `side_effect` would bypass conftest's
+    # per-poll deepcopy, so every poll would hand back the same object - which
+    # makes the coordinator's previous snapshot *be* the new payload, and
+    # anything comparing the two silently sees no change. conftest's wrapper
+    # already honours return_value, so there is nothing to clear.
     mock_client.async_get_data.return_value = payload
 
     hass.set_state(CoreState.not_running)
@@ -409,7 +418,9 @@ async def test_force_update_is_cleared_after_the_reannouncement(
     assert coordinator.reannouncing is False
 
 
-async def test_price_sensors_are_recorded_as_measurements(hass, config_entry, mock_client):
+async def test_price_sensors_are_recorded_as_measurements(
+    hass, config_entry, mock_client
+):
     """Rate and standing charge must produce long-term statistics.
 
     They previously had device_class MONETARY and no state class, so the
@@ -498,3 +509,44 @@ async def test_the_coordinator_publishes_spread_statistics(
     assert previous is not None
     assert cooling(previous)["LastMeterReading"] != cooling(current)["LastMeterReading"]
     assert cooling(current)["LastMeterReading"] == "600.000"
+
+
+async def test_deleting_the_entry_leaves_no_cache_behind(
+    hass, config_entry, mock_client, hass_storage
+):
+    """A debounced write outlived the removal that was meant to clean it up.
+
+    The cache holds the account holder's name, email, balance and meter serials,
+    so a file left behind after the integration is deleted is account data with
+    nothing left to ever remove it - and it lands in every backup.
+    """
+    await setup_entry(hass, config_entry)
+    await flush_cache_write(hass)
+    assert any(DOMAIN in key for key in hass_storage), "cache was never written"
+
+    assert await hass.config_entries.async_remove(config_entry.entry_id) == {
+        "require_restart": False
+    }
+    await hass.async_block_till_done()
+
+    # And nothing arrives late to undo it.
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=60))
+    await hass.async_block_till_done()
+
+    leftover = {k: v for k, v in hass_storage.items() if DOMAIN in k}
+    assert not leftover, f"cache survived removal: {leftover}"
+
+
+async def test_the_cache_is_on_disk_before_the_poll_returns(
+    hass, config_entry, mock_client, hass_storage
+):
+    """No window between a poll and its cache landing.
+
+    A reload inside that window came up on the previous poll's reading, which
+    then derived a statistics window overlapping one already published - and
+    that gets refused outright, losing the consumption for good.
+    """
+    await setup_entry(hass, config_entry)
+
+    # No time travel, no extra block_till_done beyond setup.
+    assert any(DOMAIN in key for key in hass_storage)

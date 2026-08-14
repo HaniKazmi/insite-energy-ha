@@ -4,11 +4,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import voluptuous as vol
-
 from homeassistant import config_entries
+from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.selector import (
     NumberSelector,
@@ -20,13 +18,14 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+import voluptuous as vol
 
 from .api import InsiteApiError, InsiteAuthError, InsiteClient
 from .const import (
-    DOMAIN,
     CONF_UPDATE_INTERVAL,
     CONF_WEIGHTS,
     DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
 )
@@ -267,10 +266,8 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_PASSWORD: password,
                 }
 
-                # Write data and options in one go. Two calls would fire the
-                # update listener twice and reload the entry twice. The
-                # async_create_entry below then finds the options unchanged and
-                # doesn't fire again. The unique id and title are the email, so
+                # Write data and options in one go, so nothing observes a
+                # half-updated entry. The unique id and title are the email, so
                 # they have to move with it.
                 self.hass.config_entries.async_update_entry(
                     self.config_entry,
@@ -278,6 +275,16 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                     options=options,
                     title=username,
                     unique_id=username,
+                )
+                # Reloaded here rather than by an update listener. The listener
+                # fired on *any* entry change, which made a reauth reload twice
+                # over and a rename reload for nothing; and OptionsFlowWithReload
+                # would not help, because it only reloads when its own options
+                # write changes something, which the call above has already
+                # done. Scheduling it explicitly is the one way to get exactly
+                # one reload for both a credential change and an options change.
+                self.hass.config_entries.async_schedule_reload(
+                    self.config_entry.entry_id
                 )
                 return self.async_create_entry(title="", data=options)
 
@@ -303,11 +310,19 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                 )
             ] = WEIGHT_SELECTOR
 
+        # Field names are built from whatever ShortName the portal returns, so
+        # they cannot all have translation keys - anything beyond the handful
+        # spelled out in strings.json renders with its raw key as the label.
+        # Naming each field against its utility here means an unlabelled
+        # `weight_el` is still identifiable from the text directly above it.
+        legend = ", ".join(
+            f"{WEIGHT_FIELD_PREFIX}{key} = {name}" for key, name in utilities.items()
+        )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(schema),
             description_placeholders={
-                "utilities": ", ".join(utilities.values()) or "none discovered yet"
+                "utilities": legend or "none discovered yet"
             },
             errors=errors,
         )

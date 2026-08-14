@@ -32,7 +32,6 @@ CACHE_ACCOUNT_KEY = "_cached_for_username"
 # On-disk cache of the last successful response, so entities can be restored
 # at startup without waiting for the (slow) website.
 STORAGE_VERSION = 1
-CACHE_SAVE_DELAY = 10
 
 # The site regularly takes tens of seconds to respond.
 REQUEST_TIMEOUT = 90

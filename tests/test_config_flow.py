@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.selector import StatisticSelector
+import pytest
 
 from custom_components.insite_energy import config_flow
 from custom_components.insite_energy.api import InsiteApiError, InsiteAuthError
@@ -349,7 +349,10 @@ async def test_an_existing_weight_is_offered_back(hass, config_entry, mock_clien
     config_entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(
         config_entry,
-        options={CONF_UPDATE_INTERVAL: 6, CONF_WEIGHTS: {"co": "sensor.cooling_activity"}},
+        options={
+            CONF_UPDATE_INTERVAL: 6,
+            CONF_WEIGHTS: {"co": "sensor.cooling_activity"},
+        },
     )
     assert await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
@@ -453,3 +456,55 @@ async def test_clearing_a_rendered_field_still_removes_its_weight(
     await hass.async_block_till_done()
 
     assert CONF_WEIGHTS not in config_entry.options
+
+
+async def test_reauth_reloads_once(hass, config_entry, mock_client):
+    """Reauth used to reload twice: once via the update listener, once itself.
+
+    `async_update_reload_and_abort` schedules its own reload, so an update
+    listener that also reloaded made every password change cost two teardowns
+    and two of this site's very slow logins - and Home Assistant warns that the
+    combination stops working in 2026.12.
+    """
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await config_entry.start_reauth_flow(hass)
+    with patch(
+        "homeassistant.config_entries.ConfigEntries.async_reload",
+        wraps=hass.config_entries.async_reload,
+    ) as reload:
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_PASSWORD: "new-password"}
+        )
+        await hass.async_block_till_done()
+
+    assert reload.call_count == 1
+    assert config_entry.data[CONF_PASSWORD] == "new-password"
+
+
+async def test_no_update_listener_is_registered(hass, config_entry, mock_client):
+    """The listener is what made reauth reload twice, and it is also what
+    Home Assistant refuses to keep supporting past 2026.12."""
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert not config_entry.update_listeners
+
+
+async def test_renaming_the_entry_does_not_reload(hass, config_entry, mock_client):
+    """A cosmetic rename used to cost a full teardown and a fresh slow login."""
+    config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    with patch(
+        "homeassistant.config_entries.ConfigEntries.async_reload",
+        wraps=hass.config_entries.async_reload,
+    ) as reload:
+        hass.config_entries.async_update_entry(config_entry, title="Downstairs")
+        await hass.async_block_till_done()
+
+    assert reload.call_count == 0

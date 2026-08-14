@@ -12,10 +12,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
-from .coordinator import (
-    InsiteEnergyDataUpdateCoordinator,
-    async_get_cache_store,
-)
+from .coordinator import InsiteEnergyDataUpdateCoordinator, async_get_cache_store
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -74,8 +71,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # to announce.
     entry.async_on_unload(async_at_started(hass, _schedule_startup_work))
 
-    entry.async_on_unload(entry.add_update_listener(update_listener))
-
+    # Deliberately no update listener. `async_update_reload_and_abort` in the
+    # reauth flow already schedules its own reload, so a listener that also
+    # reloads makes every password change cost two full teardowns and two slow
+    # logins - and Home Assistant warns that the combination stops working in
+    # 2026.12. The options flow reloads explicitly instead, which also means a
+    # cosmetic rename no longer forces a reload.
     return True
 
 
@@ -130,8 +131,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Discard the cached data when the entry is deleted."""
     await async_get_cache_store(hass, entry.entry_id).async_remove()
-
-
-async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options update."""
-    await hass.config_entries.async_reload(entry.entry_id)

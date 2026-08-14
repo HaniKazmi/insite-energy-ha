@@ -8,9 +8,11 @@
 # upstream breakage still surfaces — on our timetable rather than mid-PR.
 pytest-homeassistant-custom-component==0.13.355
 
-# Used by the pytest --cov flags. It arrives transitively today, which is not
-# the same as being guaranteed.
-pytest-cov==7.0.0
+# Used by the pytest --cov flags. Listed so the dependency is declared rather
+# than merely transitive, but deliberately unpinned: the package above pins it
+# to an exact version, so pinning a different one here is unsatisfiable and
+# fails the install outright.
+pytest-cov
 
 # Pinned so `ruff check` means the same thing run to run; its default rule set
 # moves between releases.

@@ -1,14 +1,14 @@
 {
   "domain": "insite_energy",
   "name": "Insite Energy",
+  "after_dependencies": [
+    "recorder"
+  ],
   "codeowners": [
     "@HaniKazmi"
   ],
   "config_flow": true,
   "dependencies": [],
-  "after_dependencies": [
-    "recorder"
-  ],
   "documentation": "https://github.com/HaniKazmi/insite-energy-ha",
   "integration_type": "hub",
   "iot_class": "cloud_polling",

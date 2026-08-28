@@ -104,7 +104,17 @@ The first reading after installing also publishes nothing: there's no previous r
 
 ## Development
 
+Requires Python 3.14 — `pytest-homeassistant-custom-component` needs it, and on 3.13 pip
+resolves back to a much older release rather than failing.
+
 ```bash
 pip install -r requirements_test.txt
 pytest
+ruff check .
 ```
+
+`ruff format` is deliberately not used: the existing code is not black-formatted, and
+reformatting it would bury real changes in whitespace.
+
+[ARCHITECTURE.md](ARCHITECTURE.md) covers how the integration is put together, and which
+parts are load-bearing in ways that aren't obvious from the code alone.

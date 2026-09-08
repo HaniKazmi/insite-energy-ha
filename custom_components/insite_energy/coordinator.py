@@ -14,7 +14,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import InsiteApiError, InsiteAuthError, InsiteClient
+from .api import InsiteApiError, InsiteAuthError, InsiteClient, strict_cookie_jar
 from .const import (
     CACHE_ACCOUNT_KEY,
     CONF_COOKIES,
@@ -49,7 +49,7 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         # between polls to skip the slow login. Created during entry setup, so
         # HA detaches it on unload; closing it here is forbidden.
         self.client = InsiteClient(
-            async_create_clientsession(hass),
+            async_create_clientsession(hass, cookie_jar=strict_cookie_jar()),
             self.username,
             entry.data[CONF_PASSWORD],
         )

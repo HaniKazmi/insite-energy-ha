@@ -26,6 +26,7 @@ from .api import (
     InsiteClient,
     InsiteTwoFactorInvalid,
     InsiteTwoFactorRequired,
+    strict_cookie_jar,
 )
 from .const import (
     CONF_CODE,
@@ -80,7 +81,9 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
     Raises InsiteApiError, InsiteAuthError or InsiteTwoFactorRequired on failure.
     """
     # A throwaway session, so the login cookies never reach HA's shared one.
-    session = async_create_clientsession(hass, auto_cleanup=False)
+    session = async_create_clientsession(
+        hass, auto_cleanup=False, cookie_jar=strict_cookie_jar()
+    )
     try:
         client = InsiteClient(session, data[CONF_USERNAME], data[CONF_PASSWORD])
         await client.async_get_data()
@@ -132,12 +135,18 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         single-shot credential check can.
         """
         self._async_release()
-        self._session = async_create_clientsession(self.hass, auto_cleanup=False)
+        self._session = async_create_clientsession(
+            self.hass, auto_cleanup=False, cookie_jar=strict_cookie_jar()
+        )
         self._client = InsiteClient(
             self._session,
             self._credentials[CONF_USERNAME],
             self._credentials[CONF_PASSWORD],
         )
+        # A reauth starts from whatever trust the entry has already earned;
+        # starting cold would ask for a code the site was willing to skip.
+        if self._reauth_entry is not None:
+            self._client.load_cookies(self._reauth_entry.data.get(CONF_COOKIES) or {})
         return self._client
 
     async def _async_attempt_login(
@@ -153,9 +162,8 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await client.async_get_data()
         # Ahead of InsiteAuthError, which it subclasses: being asked for a code
         # is not a rejected password, it is the site asking for the one thing
-        # only the user has. The client raises this before it POSTs anything,
-        # so the session is still clean and still holds the key the verify page
-        # wants.
+        # only the user has. Requesting the code is a separate step because it
+        # emails one, which only a flow the user is sitting in front of may do.
         except InsiteTwoFactorRequired:
             _LOGGER.debug("Account needs a verification code; requesting one")
             try:
@@ -257,7 +265,7 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Prompt for a new password for the existing account."""
+        """Prompt for a new password, and take a code if the site asks for one."""
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
         self._reauth_entry = entry

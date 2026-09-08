@@ -1,6 +1,7 @@
 """Tests for the Insite Energy client."""
 from __future__ import annotations
 
+from http.cookies import SimpleCookie
 import json
 
 import aiohttp
@@ -14,6 +15,7 @@ from custom_components.insite_energy.api import (
     InsiteTwoFactorInvalid,
     InsiteTwoFactorRequired,
     _parse_view_model,
+    strict_cookie_jar,
 )
 from custom_components.insite_energy.const import (
     CHECK_TWO_FACTOR_URL,
@@ -148,19 +150,16 @@ def queue_login_gate(session: FakeSession, sign_in_status: str = "Success") -> N
     )
 
 
-# What a full login costs: the page, the site's own two checks, then the form.
-LOGIN_SEQUENCE = [
-    ("GET", LOGIN_URL),
-    ("POST", VALIDATE_ACCOUNT_URL),
-    ("POST", CHECK_TWO_FACTOR_URL),
-    ("POST", LOGIN_URL),
-]
+# A poll logs in with the plain form: fetch the page for its token, post the
+# credentials. The site's own account/2FA checks belong to the reauth flow, not
+# here - a poll that already holds a verified-browser cookie lands straight on
+# the details page.
+LOGIN_SEQUENCE = [("GET", LOGIN_URL), ("POST", LOGIN_URL)]
 
 
 def queue_successful_login(session: FakeSession, view_model: dict) -> None:
-    """Queue everything a full login asks for."""
+    """Queue the GET+POST pair for a full login."""
     session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
-    queue_login_gate(session)
     session.add(
         "POST", LOGIN_URL, FakeResponse(DETAILS_URL, body=details_page(view_model))
     )
@@ -295,7 +294,6 @@ async def test_two_factor_landing_page_asks_for_a_code(session):
     and ask the user rather than sit on the update ladder.
     """
     session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
-    queue_login_gate(session)
     session.add("POST", LOGIN_URL, FakeResponse(TWO_FACTOR_URL, body=VERIFY_PAGE))
 
     client = InsiteClient(session, "user@example.com", "pw")
@@ -310,7 +308,6 @@ async def test_two_factor_is_recognised_by_the_form_it_renders(session):
     which retries for ever instead of asking for the code that would fix it.
     """
     session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
-    queue_login_gate(session)
     session.add(
         "POST",
         LOGIN_URL,
@@ -325,7 +322,16 @@ async def test_two_factor_is_recognised_by_the_form_it_renders(session):
 
 
 def queue_two_factor_request(session: FakeSession) -> None:
-    """Queue a login that comes back asking for a code, and the verify page."""
+    """Queue a failed poll that asks for a code, then the code request itself.
+
+    A poll first: the login form lands on the code form, which is the auth
+    failure that prompts reauth. Then the reauth's own chain - the login page
+    for its key, the account and 2FA checks, and the verify page for its key.
+    """
+    # The poll: login form -> code form.
+    session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
+    session.add("POST", LOGIN_URL, FakeResponse(TWO_FACTOR_URL, body=VERIFY_PAGE))
+    # async_start_two_factor: page key, the two checks, verify-page key.
     session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
     queue_login_gate(session, sign_in_status="RequiresVerification")
     session.add("GET", VERIFY_URL, FakeResponse(VERIFY_URL, body=VERIFY_PAGE))
@@ -341,33 +347,18 @@ async def begin_verification(session: FakeSession) -> InsiteClient:
 
 
 async def test_a_remembered_browser_logs_in_without_a_code(session, view_model):
-    """The check is what reads the cookie recording a verified browser.
+    """A verified browser reaches the details page from the login form alone.
 
-    Posting the login form without asking it first lands on the code form for
-    the whole 45 days that cookie is meant to cover, so the user is asked to
-    verify a browser the site already trusts.
+    The remembered-browser cookie is what the login POST trades for the details
+    page; the poll never has to touch the 2FA endpoints, and so never draws a
+    fresh code.
     """
     queue_successful_login(session, view_model)
 
     client = InsiteClient(session, "user@example.com", "pw")
     assert await client.async_get_data() == view_model
-    assert ("POST", CHECK_TWO_FACTOR_URL) in session.requests
+    assert ("POST", CHECK_TWO_FACTOR_URL) not in session.requests
     assert ("GET", VERIFY_URL) not in session.requests
-
-
-async def test_a_demanded_code_is_refused_before_the_form_is_posted(session):
-    """The form is not worth posting once the check has asked for a code.
-
-    It signs the password in without reading the browser-trust cookie, so it
-    can only land back on the code form.
-    """
-    session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
-    queue_login_gate(session, sign_in_status="RequiresVerification")
-
-    client = InsiteClient(session, "user@example.com", "pw")
-    with pytest.raises(InsiteTwoFactorRequired):
-        await client.async_get_data()
-    assert ("POST", LOGIN_URL) not in session.requests
 
 
 async def test_a_verified_code_returns_the_account(session, view_model):
@@ -396,18 +387,13 @@ async def test_a_verified_code_returns_the_account(session, view_model):
     assert ("POST", REGISTRATION_LOGIN_URL) in session.requests
 
 
-async def test_a_code_cannot_be_asked_for_unprompted(session):
-    """Nothing has been checked yet, so there is no verification to further."""
-    client = InsiteClient(session, "user@example.com", "pw")
-    with pytest.raises(InsiteApiError):
-        await client.async_start_two_factor()
 
+async def test_the_code_request_names_a_wrong_password(session):
+    """If the account check refuses the password, say so, before any code.
 
-async def test_a_wrong_password_is_named_before_any_code_is_sent(session):
-    """A rejected password must not become an unexplained connection failure.
-
-    The validate call is the only step that says why the site refused, and
-    getting it wrong means the user is told to check their network over a typo.
+    The validate step is the only one that explains a refusal; misreading it
+    as a connection fault would tell the user to check their network over a
+    typo.
     """
     session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
     session.add(
@@ -426,12 +412,12 @@ async def test_a_wrong_password_is_named_before_any_code_is_sent(session):
 
     client = InsiteClient(session, "user@example.com", "wrong")
     with pytest.raises(InsiteAuthError):
-        await client.async_get_data()
+        await client.async_start_two_factor()
     assert ("POST", CHECK_TWO_FACTOR_URL) not in session.requests
 
 
-async def test_a_locked_account_is_not_named_a_wrong_password(session):
-    """A lockout has to stay retryable, not send the user to a reauth prompt."""
+async def test_the_code_request_keeps_a_lockout_retryable(session):
+    """A lockout while requesting a code must not become a reauth loop."""
     session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
     session.add(
         "POST",
@@ -439,17 +425,14 @@ async def test_a_locked_account_is_not_named_a_wrong_password(session):
         FakeResponse(
             VALIDATE_ACCOUNT_URL,
             body=json.dumps(
-                {
-                    "ErrorCode": "locked_out",
-                    "ErrorDescription": "User is locked out",
-                }
+                {"ErrorCode": "locked_out", "ErrorDescription": "User is locked out"}
             ),
         ),
     )
 
     client = InsiteClient(session, "user@example.com", "pw")
     with pytest.raises(InsiteApiError) as err:
-        await client.async_get_data()
+        await client.async_start_two_factor()
     assert not isinstance(err.value, InsiteAuthError)
 
 
@@ -644,3 +627,25 @@ async def test_unparseable_details_falls_back_to_login(session, view_model):
     client = InsiteClient(session, "user@example.com", "pw")
     await client.async_get_data()
     assert await client.async_get_data() == view_model
+
+
+async def test_the_remember_token_is_sent_unquoted():
+    """The browser-trust token must go back exactly as the portal issued it.
+
+    insite_2fa_rb is base64, so its value carries '/' and '+'. aiohttp's default
+    jar quotes such a value on send; the portal compares the raw token, so a
+    quoted one is read as no token and every login draws a fresh emailed code.
+    Storing the cookie faithfully is not enough - it has to leave unquoted.
+    """
+    from yarl import URL
+
+    token = "abc/def+ghi=="
+    jar = strict_cookie_jar()
+    cookie = SimpleCookie()
+    cookie["insite_2fa_rb"] = token
+    jar.update_cookies(cookie, URL("https://my.insite-energy.co.uk/"))
+
+    sent = jar.filter_cookies(URL("https://my.insite-energy.co.uk/Account/Login"))
+    rendered = sent.output(header="", sep=";").strip()
+    assert rendered == f"insite_2fa_rb={token}"
+    assert '"' not in rendered

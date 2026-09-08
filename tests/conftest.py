@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 import pytest
@@ -12,6 +12,9 @@ from custom_components.insite_energy.const import DOMAIN
 
 USERNAME = "user@example.com"
 PASSWORD = "hunter2"
+# Stands in for the jar a verified login leaves behind, the useful part of
+# which is the cookie saying this browser has already answered a code.
+COOKIES = {"remember-browser": "verified"}
 
 
 @pytest.fixture(autouse=True)
@@ -90,6 +93,12 @@ def mock_client(view_model):
         return copy.deepcopy(payload)
 
     instance.async_get_data = AsyncMock(side_effect=_get_data)
+
+    # Cookie handling is synchronous, and an AsyncMock would hand back a
+    # coroutine where the code expects a dict of cookies to store.
+    instance.load_cookies = MagicMock()
+    instance.dump_cookies = MagicMock(return_value=dict(COOKIES))
+    instance.cookies_changed = False
 
     with patch(
         "custom_components.insite_energy.coordinator.InsiteClient",

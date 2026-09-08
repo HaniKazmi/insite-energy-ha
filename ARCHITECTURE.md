@@ -42,7 +42,59 @@ The client distinguishes two failure classes, and the distinction is load-bearin
 
 A failed login re-renders the login page, but so do a lockout and a maintenance window.
 Misreading one of those as a bad password stops polling until the user re-enters a
-password that was correct all along, so `_TRANSIENT_LOGIN_RE` reclassifies them.
+password that was correct all along, so `_TRANSIENT_LOGIN_RE` reclassifies them. It is
+matched against the page with its scripts stripped: every render carries
+`var genericError = '...Please try again later.'`, which otherwise matches every time and
+leaves `InsiteAuthError` unreachable.
+
+### Two-factor authentication
+
+The portal can require a six digit code, emailed on sign-in.
+
+**Every login goes through the site's own gate, not the login form alone.**
+`/Account/Login` signs a password in without reading `insite_2fa_rb`, the cookie recording
+that this browser has already been verified, so a bare form POST lands on the code form
+for the entire 45 days that cookie is meant to cover.
+`/Account/CheckIsTwoFactorRequired` is the step that reads it, which makes it the only way
+to spend that trust rather than ask the user for a fresh code on every poll. The client
+therefore runs what the site's own login script runs, in order, before it POSTs anything:
+`/Account/ValidateUserRoleAndConsumerStatus`, then the check. A `RequiresVerification`
+there is `InsiteTwoFactorRequired`, an `InsiteAuthError` subclass, so polling stops and the
+user is asked — retrying could only reach the same form.
+
+This costs at most one email per expiry, not one per poll, because the refusal stops
+polling. The validate call earns its place by being the only step that names a refusal,
+which is what keeps a wrong password from surfacing as a failure to connect.
+
+The form POST keeps its own check on where it lands, by markup as well as path, so a login
+that reaches the code form despite the gate — a login page that stops carrying a key, say
+— still asks for a code rather than retrying for ever.
+
+**Getting a code sent** needs the verify page, fetched with `isSubsequent=true`. Which of
+the check and that page sends the email is not documented and not observable from outside;
+the browser performs both and so does this, so it need not be known.
+
+Each page carries a per-render `base64AuthKey` that its JSON endpoints want echoed back as
+HTTP Basic credentials, and the keys are not interchangeable between renders, so every
+page is scraped for its own. The verify call is multipart with the address
+percent-encoded, matching what the site's script builds; a urlencoded body with a plain
+address is a different request.
+
+Verification always asks the portal to remember the browser, which is worth 45 days. The
+cookie carrying that trust is `insite_2fa_rb`, a name of the site's own invention rather
+than any ASP.NET default, which is why the whole jar is persisted instead of the one
+cookie a guessed name would have selected. It is kept in `entry.data`, not in the response
+cache: the config flow is
+what first obtains it, and `entry.data` is the only store that exists before the entry
+does. A cache keyed on entry id could not be written until after setup, by which time the
+first poll has already asked for a second code. Changing the email in the options flow
+drops it, for the same reason `_cached_for_username` exists.
+
+The whole exchange runs on one session held by the config flow. The CSRF token, the page
+key and the partial sign-in a correct password earns are all bound to it, so a code
+submitted on a fresh session answers a verification that never started. The gate raises
+before it POSTs, so the session it hands on is clean and still holds the login page key
+that asking for a code reuses.
 
 ### coordinator.py
 
@@ -119,6 +171,11 @@ than `MAX_WINDOW_HOURS`; the window overlaps hours already published.
 
 These look like redundancy or bugs and are neither. The code comments carry the full
 reasoning.
+
+**A 2FA challenge in the options flow is a passing credential check.** Reaching the code
+form means the portal accepted the password, which is all that check establishes. The code
+itself is asked for by the reauth prompt the next poll raises, rather than by growing a
+second verification step into the options flow.
 
 **Statistics must never cost a poll.** `async_publish_spread_statistics` swallows every
 failure — a recorder-less instance, one malformed utility, anything unforeseen. The

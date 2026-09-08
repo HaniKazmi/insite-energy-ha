@@ -10,14 +10,22 @@ from homeassistant.helpers.selector import StatisticSelector
 import pytest
 
 from custom_components.insite_energy import config_flow
-from custom_components.insite_energy.api import InsiteApiError, InsiteAuthError
+from custom_components.insite_energy.api import (
+    InsiteApiError,
+    InsiteAuthError,
+    InsiteTwoFactorInvalid,
+    InsiteTwoFactorRequired,
+)
 from custom_components.insite_energy.const import (
+    CONF_CODE,
+    CONF_COOKIES,
+    CONF_RESEND,
     CONF_UPDATE_INTERVAL,
     CONF_WEIGHTS,
     DOMAIN,
 )
 
-from .conftest import PASSWORD, USERNAME
+from .conftest import COOKIES, PASSWORD, USERNAME
 
 NEW_USERNAME = "new@example.com"
 
@@ -34,7 +42,11 @@ async def test_user_flow_creates_entry(hass, mock_client):
         {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD}
+    assert result["data"] == {
+        CONF_USERNAME: USERNAME,
+        CONF_PASSWORD: PASSWORD,
+        CONF_COOKIES: COOKIES,
+    }
 
 
 async def test_validation_releases_its_session(hass, mock_client, caplog):
@@ -87,6 +99,99 @@ async def test_user_flow_errors(hass, mock_client, error, expected):
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": expected}
+
+
+async def _start_code_prompt(hass, mock_client):
+    """Drive the user flow to the point where it wants a code."""
+    mock_client.async_get_data.side_effect = InsiteTwoFactorRequired("code needed")
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD},
+    )
+
+
+async def test_a_code_request_becomes_a_prompt(hass, mock_client):
+    """A 2FA challenge asks for the code rather than blaming the password."""
+    result = await _start_code_prompt(hass, mock_client)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "two_factor"
+    assert not result["errors"]
+    mock_client.async_start_two_factor.assert_awaited_once()
+
+
+async def test_a_verified_code_stores_the_cookies(hass, mock_client):
+    """The jar has to reach the entry, or the next poll asks all over again."""
+    result = await _start_code_prompt(hass, mock_client)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CODE: "123456", CONF_RESEND: False}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    mock_client.async_submit_two_factor.assert_awaited_once_with("123456")
+    assert result["data"][CONF_COOKIES] == COOKIES
+
+
+async def test_a_rejected_code_asks_again(hass, mock_client):
+    """A mistyped code returns to the same prompt, not to the credentials."""
+    result = await _start_code_prompt(hass, mock_client)
+    mock_client.async_submit_two_factor.side_effect = InsiteTwoFactorInvalid("no")
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CODE: "000000", CONF_RESEND: False}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "two_factor"
+    assert result["errors"]["base"] == "invalid_code"
+
+
+async def test_an_empty_code_is_not_sent_to_the_site(hass, mock_client):
+    """Submitting nothing must not be read as a verification attempt."""
+    result = await _start_code_prompt(hass, mock_client)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CODE: "", CONF_RESEND: False}
+    )
+    assert result["step_id"] == "two_factor"
+    assert result["errors"]["base"] == "invalid_code"
+    mock_client.async_submit_two_factor.assert_not_awaited()
+
+
+async def test_a_resend_keeps_the_prompt_open(hass, mock_client):
+    """Asking for another code re-shows the form instead of ending the flow."""
+    result = await _start_code_prompt(hass, mock_client)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CODE: "", CONF_RESEND: True}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "two_factor"
+    assert result["errors"]["base"] == "code_resent"
+    mock_client.async_resend_two_factor.assert_awaited_once()
+    mock_client.async_submit_two_factor.assert_not_awaited()
+
+
+async def test_reauth_can_answer_a_code_prompt(hass, config_entry, mock_client):
+    """The entry a 2FA challenge broke is repaired by the same reauth flow."""
+    config_entry.add_to_hass(hass)
+    mock_client.async_get_data.side_effect = InsiteTwoFactorRequired("code needed")
+    result = await config_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_PASSWORD: PASSWORD}
+    )
+    assert result["step_id"] == "two_factor"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CODE: "123456", CONF_RESEND: False}
+    )
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert config_entry.data[CONF_COOKIES] == COOKIES
 
 
 async def test_reauth_updates_the_password(hass, config_entry, mock_client):

@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 from .api import InsiteApiError, InsiteAuthError, InsiteClient
 from .const import (
     CACHE_ACCOUNT_KEY,
+    CONF_COOKIES,
     CONF_UPDATE_INTERVAL,
     CONF_WEIGHTS,
     DEFAULT_UPDATE_INTERVAL,
@@ -52,6 +53,9 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
             self.username,
             entry.data[CONF_PASSWORD],
         )
+        # The verified-browser cookie is worth more than the session one: it is
+        # what stops a restart asking the user for a fresh emailed code.
+        self.client.load_cookies(entry.data.get(CONF_COOKIES) or {})
         self._store = async_get_cache_store(hass, entry.entry_id)
 
         interval_hours = int(
@@ -130,6 +134,22 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
         self.data = cached
         return True
 
+    @callback
+    def _async_store_cookies(self) -> None:
+        """Keep the jar in the entry, so the next run starts already verified.
+
+        There is no update listener on the entry, so writing here reloads
+        nothing; the poll that triggered it carries on.
+        """
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            data={
+                **self.config_entry.data,
+                CONF_COOKIES: self.client.dump_cookies(),
+            },
+        )
+        self.client.cookies_changed = False
+
     async def _async_update_data(self) -> dict:
         """Fetch data from API endpoint."""
         try:
@@ -140,6 +160,9 @@ class InsiteEnergyDataUpdateCoordinator(DataUpdateCoordinator):
             raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
         except InsiteApiError as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err
+
+        if self.client.cookies_changed:
+            self._async_store_cookies()
 
         view_model[LAST_POLL_KEY] = dt_util.utcnow()
         view_model[CACHE_ACCOUNT_KEY] = self.username

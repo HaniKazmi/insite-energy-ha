@@ -20,8 +20,17 @@ from homeassistant.helpers.selector import (
 )
 import voluptuous as vol
 
-from .api import InsiteApiError, InsiteAuthError, InsiteClient
+from .api import (
+    InsiteApiError,
+    InsiteAuthError,
+    InsiteClient,
+    InsiteTwoFactorInvalid,
+    InsiteTwoFactorRequired,
+)
 from .const import (
+    CONF_CODE,
+    CONF_COOKIES,
+    CONF_RESEND,
     CONF_UPDATE_INTERVAL,
     CONF_WEIGHTS,
     DEFAULT_UPDATE_INTERVAL,
@@ -55,11 +64,20 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
+# The code is optional so that "resend" can be submitted on its own; a form that
+# required it would refuse to submit for the very user who never got one.
+STEP_TWO_FACTOR_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_CODE, default=""): str,
+        vol.Optional(CONF_RESEND, default=False): bool,
+    }
+)
+
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the user input allows us to connect.
 
-    Raises InsiteApiError or InsiteAuthError on failure.
+    Raises InsiteApiError, InsiteAuthError or InsiteTwoFactorRequired on failure.
     """
     # A throwaway session, so the login cookies never reach HA's shared one.
     session = async_create_clientsession(hass, auto_cleanup=False)
@@ -79,6 +97,98 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialize the flow."""
+        self._client: InsiteClient | None = None
+        self._session = None
+        self._credentials: dict[str, Any] = {}
+        self._reauth_entry: config_entries.ConfigEntry | None = None
+
+    @callback
+    def async_remove(self) -> None:
+        """Release the session when the flow ends, abandoned included."""
+        self._async_release()
+
+    @callback
+    def _async_release(self) -> None:
+        """Detach the session held across steps.
+
+        close() is a warning stub on an HA session because the connector is
+        shared, so detach() is the only thing that actually releases one.
+        """
+        if self._session is not None:
+            self._session.detach()
+            self._session = None
+        self._client = None
+
+    @callback
+    def _async_new_client(self) -> InsiteClient:
+        """Start a session that lives until the flow ends.
+
+        The CSRF token, the per-render page key and the partial sign-in the
+        portal grants a correct password are all bound to one session. A code
+        submitted on a fresh session answers a verification that never started,
+        so the client cannot be thrown away between the two steps the way a
+        single-shot credential check can.
+        """
+        self._async_release()
+        self._session = async_create_clientsession(self.hass, auto_cleanup=False)
+        self._client = InsiteClient(
+            self._session,
+            self._credentials[CONF_USERNAME],
+            self._credentials[CONF_PASSWORD],
+        )
+        return self._client
+
+    async def _async_attempt_login(
+        self, errors: dict[str, str]
+    ) -> config_entries.ConfigFlowResult | None:
+        """Log in, sending a 2FA challenge to the code step.
+
+        Returns a flow result once there is one, or None to re-show the form
+        with whatever it put in `errors`.
+        """
+        client = self._async_new_client()
+        try:
+            await client.async_get_data()
+        # Ahead of InsiteAuthError, which it subclasses: being asked for a code
+        # is not a rejected password, it is the site asking for the one thing
+        # only the user has. The client raises this before it POSTs anything,
+        # so the session is still clean and still holds the key the verify page
+        # wants.
+        except InsiteTwoFactorRequired:
+            _LOGGER.debug("Account needs a verification code; requesting one")
+            try:
+                await client.async_start_two_factor()
+            except InsiteApiError:
+                _LOGGER.exception("Could not start two-factor verification")
+                errors["base"] = "cannot_connect"
+                return None
+            return await self.async_step_two_factor()
+        except InsiteAuthError:
+            errors["base"] = "invalid_auth"
+        except InsiteApiError:
+            errors["base"] = "cannot_connect"
+        except Exception:
+            _LOGGER.exception("Unexpected exception")
+            errors["base"] = "unknown"
+        else:
+            return self._async_finish()
+        return None
+
+    @callback
+    def _async_finish(self) -> config_entries.ConfigFlowResult:
+        """Store the verified session's cookies alongside the credentials."""
+        assert self._client is not None
+        data = {**self._credentials, CONF_COOKIES: self._client.dump_cookies()}
+        if self._reauth_entry is not None:
+            return self.async_update_reload_and_abort(
+                self._reauth_entry, data={**self._reauth_entry.data, **data}
+            )
+        return self.async_create_entry(
+            title=self._credentials[CONF_USERNAME], data=data
+        )
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -89,19 +199,53 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(user_input[CONF_USERNAME])
             self._abort_if_unique_id_configured()
 
-            try:
-                info = await validate_input(self.hass, user_input)
-                return self.async_create_entry(title=info["title"], data=user_input)
-            except InsiteAuthError:
-                errors["base"] = "invalid_auth"
-            except InsiteApiError:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
+            self._credentials = dict(user_input)
+            if (result := await self._async_attempt_login(errors)) is not None:
+                return result
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+        )
+
+    async def async_step_two_factor(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Take the code the portal emails, and remember this browser."""
+        errors: dict[str, str] = {}
+        if user_input is not None and self._client is not None:
+            code = str(user_input.get(CONF_CODE) or "").strip()
+            if user_input.get(CONF_RESEND):
+                try:
+                    await self._client.async_resend_two_factor()
+                except InsiteApiError as err:
+                    _LOGGER.debug("Resend refused: %s", err)
+                    errors["base"] = "resend_failed"
+                else:
+                    # Reported through `errors` because a form has nowhere else
+                    # to say anything; the wording carries the real meaning.
+                    errors["base"] = "code_resent"
+            elif not code:
+                errors["base"] = "invalid_code"
+            else:
+                try:
+                    await self._client.async_submit_two_factor(code)
+                except InsiteTwoFactorInvalid:
+                    errors["base"] = "invalid_code"
+                except InsiteApiError:
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    _LOGGER.exception("Unexpected exception")
+                    errors["base"] = "unknown"
+                else:
+                    return self._async_finish()
+
+        return self.async_show_form(
+            step_id="two_factor",
+            data_schema=STEP_TWO_FACTOR_SCHEMA,
+            description_placeholders={
+                "username": self._credentials.get(CONF_USERNAME, "")
+            },
+            errors=errors,
         )
 
     async def async_step_reauth(
@@ -116,30 +260,17 @@ class InsiteEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Prompt for a new password for the existing account."""
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
+        self._reauth_entry = entry
         username = entry.data[CONF_USERNAME]
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            try:
-                await validate_input(
-                    self.hass,
-                    {
-                        CONF_USERNAME: username,
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
-                    },
-                )
-            except InsiteAuthError:
-                errors["base"] = "invalid_auth"
-            except InsiteApiError:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            else:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data={**entry.data, CONF_PASSWORD: user_input[CONF_PASSWORD]},
-                )
+            self._credentials = {
+                CONF_USERNAME: username,
+                CONF_PASSWORD: user_input[CONF_PASSWORD],
+            }
+            if (result := await self._async_attempt_login(errors)) is not None:
+                return result
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -231,6 +362,15 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                         self.hass,
                         {CONF_USERNAME: username, CONF_PASSWORD: password},
                     )
+                # Reaching the code form means the portal accepted the password,
+                # which is all this check is here to establish. The code itself
+                # is asked for by the reauth prompt the next poll raises, rather
+                # than by growing a second verification step here.
+                except InsiteTwoFactorRequired:
+                    _LOGGER.debug(
+                        "Credentials accepted; a verification code will be "
+                        "requested on the next poll"
+                    )
                 except InsiteAuthError:
                     errors["base"] = "invalid_auth"
                 except InsiteApiError:
@@ -265,6 +405,11 @@ class InsiteEnergyOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_USERNAME: username,
                     CONF_PASSWORD: password,
                 }
+                # A verified-browser cookie belongs to the account that earned
+                # it. Presenting it for a different email would either be
+                # ignored or, worse, keep serving the previous account.
+                if username != self.config_entry.data[CONF_USERNAME]:
+                    new_data.pop(CONF_COOKIES, None)
 
                 # Write data and options in one go, so nothing observes a
                 # half-updated entry. The unique id and title are the email, so

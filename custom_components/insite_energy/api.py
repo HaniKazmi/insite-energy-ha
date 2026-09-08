@@ -31,6 +31,20 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def strict_cookie_jar() -> aiohttp.CookieJar:
+    """A cookie jar that sends values verbatim, the way a browser does.
+
+    The remembered-browser token, `insite_2fa_rb`, is a base64 blob: its value
+    contains '/', '+' and '=', which aiohttp's default jar treats as needing
+    quoting and so sends as `insite_2fa_rb="..."`. The portal compares the raw
+    token, so the quoted form matches nothing - it is read as no token at all,
+    and every login is met with a fresh emailed code however faithfully the
+    cookie was stored. Sending it unquoted is the whole of what keeps a
+    verified browser verified for its 45 days.
+    """
+    return aiohttp.CookieJar(quote_cookie=False)
+
 _TOKEN_RE = re.compile(
     r'name="__RequestVerificationToken"[^>]*?value="(.*?)"', re.DOTALL
 )
@@ -98,9 +112,6 @@ class InsiteClient:
         # Set while a verification is in flight, holding the verify page's own
         # key. Cleared once a code is accepted.
         self._two_factor_key: str | None = None
-        # The login page key the gate last used, kept so that asking for a code
-        # does not have to fetch that page a second time.
-        self._login_key: str | None = None
         # Raised when a login has put a cookie in the jar that is worth keeping
         # across restarts. The coordinator clears it once it has written them.
         self.cookies_changed = False
@@ -192,8 +203,6 @@ class InsiteClient:
             _LOGGER.debug("No CSRF token in login page: %s", content[:500])
             raise InsiteApiError("Failed to find CSRF token")
 
-        await self._async_refuse_if_code_needed(content)
-
         payload = {
             "__RequestVerificationToken": token_match.group(1),
             "email": self._username,
@@ -243,55 +252,27 @@ class InsiteClient:
         self.cookies_changed = True
         return view_model
 
-    async def _async_refuse_if_code_needed(self, login_page: str) -> None:
-        """Run the site's own gate before submitting the login form.
-
-        `/Account/Login` signs the password in without reading `insite_2fa_rb`,
-        the cookie recording that this browser has already been verified, so a
-        form POST lands on the code form for the whole 45 days that cookie is
-        meant to cover. `CheckIsTwoFactorRequired` is the step that reads it,
-        which makes it the only way to spend that trust instead of asking the
-        user for a fresh code every poll.
-
-        A code is sent only when one is genuinely needed, and that outcome
-        becomes ConfigEntryAuthFailed, which stops polling - so this costs one
-        email per expiry rather than one per poll.
-        """
-        if (key_match := _AUTH_KEY_RE.search(login_page)) is None:
-            # The POST still recognises the code form, so a login page that
-            # stops carrying a key degrades to prompting the user for a code
-            # rather than failing outright.
-            _LOGGER.warning("No page key on the login page; skipping the 2FA check")
-            return
-
-        self._login_key = key_match.group(1)
-        await self._async_validate_account(self._login_key)
-        sign_in_status = await self._async_check_two_factor(self._login_key)
-        _LOGGER.debug(
-            "CheckIsTwoFactorRequired for %s -> signInStatus=%s",
-            self._username,
-            sign_in_status,
-        )
-        if sign_in_status == "RequiresVerification":
-            raise InsiteTwoFactorRequired(
-                "Insite Energy is asking for a verification code"
-            )
-
     async def async_start_two_factor(self) -> None:
-        """Get a verification code sent, once the gate has asked for one.
+        """Get a verification code sent, and be ready to accept it.
 
-        The gate has already run the account and two-factor checks against this
-        session, so only the verify page is left. It is one of the two steps
-        that sends the email - the site does not say which - and the gate
-        performed the other, so between them the code is on its way.
+        Runs what the site's own login script runs: the account check, then
+        `/Account/CheckIsTwoFactorRequired`, which is the step that sends the
+        email, then the verify page for the key its endpoint demands.
 
-        Leaves the client holding the verify page's own key, which is the only
-        one its endpoint accepts.
+        Only ever called from a flow the user is sitting in front of. The check
+        sends a code every time it reports `RequiresVerification`, which for an
+        account with 2FA is every time it is called - so a poll must never call
+        it, or every poll costs the user an email.
         """
-        if not self._login_key:
-            raise InsiteApiError("No verification was asked for")
-
         with _transport_errors():
+            key = await self._async_page_key(LOGIN_URL)
+            await self._async_validate_account(key)
+            sign_in_status = await self._async_check_two_factor(key)
+            _LOGGER.debug(
+                "CheckIsTwoFactorRequired for %s -> signInStatus=%s",
+                self._username,
+                sign_in_status,
+            )
             self._two_factor_key = await self._async_page_key(self._verify_page_url)
             _LOGGER.debug("Verify page reached; code should be in the user's inbox")
 

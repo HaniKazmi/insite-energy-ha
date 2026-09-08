@@ -15,7 +15,13 @@ from custom_components.insite_energy.api import (
 )
 from custom_components.insite_energy.const import DETAILS_URL, LOGIN_URL
 
+# Carries the inline `genericError` script the real page always renders. Its
+# text matches the transient-login regex, so a fixture without it lets the
+# client agree with the tests that a wrong password raises InsiteAuthError while
+# the live site produces an endless retry instead.
 LOGIN_PAGE = (
+    "<script>var genericError = 'We are unable to process your request at this "
+    "time. Please try again later.';</script>"
     '<form><input name="__RequestVerificationToken" type="hidden" '
     'value="tok-123" /></form>'
 )
@@ -165,6 +171,28 @@ async def test_bad_password_raises_auth_error(session):
     client = InsiteClient(session, "user@example.com", "wrong")
     with pytest.raises(InsiteAuthError):
         await client.async_get_data()
+
+
+async def test_lockout_message_is_not_reported_as_bad_credentials(session):
+    """A lockout notice in the rendered page keeps polling on the retry ladder.
+
+    Treating it as a bad password stops polls until the user re-enters a
+    password that was correct all along.
+    """
+    session.add("GET", LOGIN_URL, FakeResponse(LOGIN_URL, body=LOGIN_PAGE))
+    session.add(
+        "POST",
+        LOGIN_URL,
+        FakeResponse(
+            LOGIN_URL,
+            body=LOGIN_PAGE + "<p>Your account is locked out.</p>",
+        ),
+    )
+
+    client = InsiteClient(session, "user@example.com", "pw")
+    with pytest.raises(InsiteApiError) as err:
+        await client.async_get_data()
+    assert not isinstance(err.value, InsiteAuthError)
 
 
 async def test_outage_is_not_reported_as_bad_credentials(session):

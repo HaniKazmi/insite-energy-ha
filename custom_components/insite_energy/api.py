@@ -43,6 +43,14 @@ _TRANSIENT_LOGIN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Every render of the login page carries
+# `var genericError = '...Please try again later.'` in an inline script, which
+# matches the "try again later" alternative above. Searching the raw HTML
+# therefore reads every failed login as transient, which leaves InsiteAuthError
+# unreachable and a genuinely wrong password retrying for ever instead of
+# prompting for reauth. Only text the site actually renders can carry a reason.
+_SCRIPT_RE = re.compile(r"(?is)<script\b[^>]*>.*?</script\s*>")
+
 
 class InsiteClient:
     """Client for the Insite Energy customer portal.
@@ -148,7 +156,9 @@ class InsiteClient:
             # details page. Anything else is a site problem, not a bad password.
             if _is_path(response, LOGIN_PATH):
                 body = await response.text()
-                if (transient := _TRANSIENT_LOGIN_RE.search(body)) is not None:
+                if (
+                    transient := _TRANSIENT_LOGIN_RE.search(_SCRIPT_RE.sub(" ", body))
+                ) is not None:
                     raise InsiteApiError(
                         "Login refused for a reason other than the password "
                         f"({transient.group(0)!r}); will retry"

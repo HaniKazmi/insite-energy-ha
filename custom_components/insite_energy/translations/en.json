@@ -9,15 +9,26 @@
           "password": "Password"
         }
       },
+      "two_factor": {
+        "title": "Verification code",
+        "description": "Insite Energy has emailed a verification code to {username}. Enter it below. This browser is then remembered for 45 days, so you should not be asked again until then. Tick \"Send a new code\" if one has not arrived.",
+        "data": {
+          "code": "Verification code",
+          "resend": "Send a new code"
+        }
+      },
       "reauth_confirm": {
         "title": "Reauthenticate Insite Energy",
-        "description": "The password for {username} is no longer working. Enter the current one.",
+        "description": "Home Assistant could not sign in as {username}. Enter the current password. If Insite Energy asks for a verification code, you will be prompted for one next.",
         "data": {
           "password": "Password"
         }
       }
     },
     "error": {
+      "code_resent": "A new code has been sent - check your inbox.",
+      "invalid_code": "Enter the 6-digit code from the email.",
+      "resend_failed": "Could not send a new code. Cancel and start again to get a fresh one.",
       "cannot_connect": "Failed to connect",
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"

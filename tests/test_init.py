@@ -21,10 +21,10 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.insite_energy import INITIAL_RETRY_DELAYS, _async_startup_refresh
 from custom_components.insite_energy.api import InsiteApiError
-from custom_components.insite_energy.const import CONF_WEIGHTS, DOMAIN
+from custom_components.insite_energy.const import CONF_COOKIES, CONF_WEIGHTS, DOMAIN
 from custom_components.insite_energy.coordinator import InsiteEnergyDataUpdateCoordinator
 
-from .conftest import USERNAME
+from .conftest import COOKIES, USERNAME
 
 # Every entity the integration creates, as a unique id suffix.
 ENTITY_SUFFIXES = [
@@ -172,6 +172,30 @@ async def test_cache_round_trips_the_poll_timestamp(hass, config_entry, mock_cli
 
     await hass.config_entries.async_unload(config_entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_a_poll_keeps_the_cookies_it_was_given(hass, config_entry, mock_client):
+    """A login's cookies have to reach the entry to outlive the process.
+
+    The 45 day browser trust is a cookie; left in the session it dies with the
+    next restart and the user is asked for another emailed code.
+    """
+    mock_client.cookies_changed = True
+    await setup_entry(hass, config_entry)
+
+    assert config_entry.data.get(CONF_COOKIES) == COOKIES
+    # Cleared once written, so a poll that changed nothing does not rewrite it.
+    assert mock_client.cookies_changed is False
+
+
+async def test_a_poll_that_changes_no_cookies_leaves_the_entry_alone(
+    hass, config_entry, mock_client
+):
+    """Only a login writes cookies; a warm poll has nothing new to store."""
+    mock_client.cookies_changed = False
+    await setup_entry(hass, config_entry)
+
+    assert CONF_COOKIES not in config_entry.data
 
 
 async def test_cache_from_another_account_is_ignored(hass, config_entry, mock_client):

@@ -6,10 +6,8 @@ which is exactly what happened. Recorder emits epoch seconds; the code divided b
 1000, so every hour landed in 1970, matched nothing, and weighting silently
 degraded to an even spread with only a DEBUG line to show for it.
 
-This file is separate because `recorder_mock` refuses to build a database once
-`hass` exists, and the autouse fixture in conftest pulls `hass` in first. The
-override below shadows it for this module only, so the rest of the suite keeps
-running without the cost of a real database.
+This file is separate so `recorder_mock` only spins up a real database for the
+tests that need one, keeping the rest of the suite fast.
 """
 from __future__ import annotations
 
@@ -26,9 +24,7 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.components.recorder.common import (
-    async_wait_recording_done,
-)
+from pytest_homeassistant.components.recorder.common import async_wait_recording_done
 
 from custom_components.insite_energy.statistics import (
     async_publish_spread_statistics,
@@ -40,8 +36,8 @@ from .test_statistics import payload
 
 
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(recorder_mock, enable_custom_integrations):
-    """Shadow conftest's fixture so recorder_mock is built before hass."""
+def use_recorder(recorder_mock):
+    """Set up an in-memory recorder database before hass for this module."""
     return
 
 
@@ -52,7 +48,7 @@ async def test_real_recorder_weights_are_read_in_the_right_unit(hass):
     and it fails with either `/ 1000` or `* 1000` reinstated.
     """
     start = dt_util.as_utc(
-        parse_reading_date("2026/07/04 00:00", dt_util.DEFAULT_TIME_ZONE)
+        parse_reading_date("2026/07/04 00:00", dt_util.get_default_time_zone())
     )
 
     # Outside our own namespace: statistics.py refuses to weight a utility by
@@ -60,7 +56,6 @@ async def test_real_recorder_weights_are_read_in_the_right_unit(hass):
     async_add_external_statistics(
         hass,
         {
-            "has_mean": True,
             "mean_type": StatisticMeanType.ARITHMETIC,
             "has_sum": False,
             "name": "Test Activity",
@@ -119,8 +114,12 @@ async def test_published_statistics_are_accepted_by_recorder(hass, caplog):
     rows = await get_instance(hass).async_add_executor_job(
         statistics_during_period,
         hass,
-        dt_util.as_utc(parse_reading_date("2026/07/04 00:00", dt_util.DEFAULT_TIME_ZONE)),
-        dt_util.as_utc(parse_reading_date("2026/07/05 00:00", dt_util.DEFAULT_TIME_ZONE)),
+        dt_util.as_utc(
+            parse_reading_date("2026/07/04 00:00", dt_util.get_default_time_zone())
+        ),
+        dt_util.as_utc(
+            parse_reading_date("2026/07/05 00:00", dt_util.get_default_time_zone())
+        ),
         {energy_id},
         "hour",
         None,
@@ -150,7 +149,7 @@ async def test_a_weight_source_with_no_prior_history_does_not_hijack_the_spread(
     spread onto it - the exact single-spike artefact this feature removes.
     """
     start = dt_util.as_utc(
-        parse_reading_date("2026/07/04 00:00", dt_util.DEFAULT_TIME_ZONE)
+        parse_reading_date("2026/07/04 00:00", dt_util.get_default_time_zone())
     )
 
     # Cumulative, and it starts *inside* the window carrying a large lifetime
@@ -216,7 +215,7 @@ async def test_a_meter_idle_at_zero_keeps_the_hour_it_finally_moves(hass):
     returns rather than in the arithmetic done afterwards.
     """
     start = dt_util.as_utc(
-        parse_reading_date("2026/07/04 00:00", dt_util.DEFAULT_TIME_ZONE)
+        parse_reading_date("2026/07/04 00:00", dt_util.get_default_time_zone())
     )
 
     async_add_external_statistics(

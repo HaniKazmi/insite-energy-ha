@@ -1,8 +1,8 @@
 # Architecture
 
-A Home Assistant custom integration (distributed via HACS) that tracks account balance,
-meter readings and tariffs from Insite Energy heat networks. See the [README](README.md)
-for what it does from a user's point of view.
+A Home Assistant custom integration (distributed via the Home Assistant Marketplace / HACS)
+that tracks account balance, meter readings and tariffs from Insite Energy heat networks.
+See the [README](README.md) for what it does from a user's point of view.
 
 There is no API. The account payload is a JavaScript object literal embedded in the HTML
 of the customer portal's `/Customer/Details` page, so the integration logs in, fetches

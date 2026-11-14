@@ -9,8 +9,7 @@ each entity means and why a reading can be refused.
 
 ## Commands
 
-Python 3.14 is required: `pytest-homeassistant-custom-component` needs it, and on 3.13 pip
-silently resolves back to a release six months old instead of failing.
+Python 3.14 is required: Home Assistant 2026.11+ and `pytest-homeassistant` need it.
 
 ```bash
 pip install -r requirements_test.txt
@@ -35,8 +34,8 @@ CI (`.github/workflows/tests.yml`) runs `pytest` with `--cov-fail-under=90` plus
 real changes in whitespace. Rule selection in `ruff.toml` is explicit rather than
 inherited, so that a ruff release cannot silently change what CI means.
 
-**Dependencies are pinned on purpose.** `pytest-homeassistant-custom-component` drags in
-Home Assistant, so an unpinned version means every CI run tests a different Home
+**Dependencies are pinned on purpose.** `pytest-homeassistant` drags in Home
+Assistant, so an unpinned version means every CI run tests a different Home
 Assistant. A scheduled `latest` job installs it unpinned instead, so upstream breakage
 surfaces on its own timetable rather than mid-PR.
 
@@ -55,8 +54,8 @@ Fixtures in `tests/conftest.py`: `view_model` (a trimmed real payload), `config_
 deep-copies each response — otherwise the coordinator's previous snapshot *is* the new
 payload, and anything comparing the two sees no change.
 
-`tests/test_statistics_recorder.py` shadows that autouse fixture for its own module,
-because `recorder_mock` refuses to build a database once `hass` exists. It is the only
-weighting test that goes through a real recorder, and it exists because fixture-based
-tests can agree with the code on a wrong unit and all still pass — which is how the
-epoch-seconds bug survived.
+`tests/test_statistics_recorder.py` enables `recorder_mock` for its own module only, so
+the rest of the suite avoids spinning up a SQLite database. It is the only weighting test
+that goes through a real recorder, and it exists because fixture-based tests can agree
+with the code on a wrong unit and all still pass — which is how the epoch-seconds bug
+survived.

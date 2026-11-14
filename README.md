@@ -6,13 +6,13 @@ readings and tariffs from Insite Energy heat networks.
 > Requires Home Assistant 2025.11.0 or newer — the spread statistics set `unit_class`
 > on their metadata, which recorder only gained in that release.
 
-## Installation via HACS
+## Installation
 
-1. Open HACS in Home Assistant.
-2. Go to Integrations > Menu (3 dots) > Custom repositories.
-3. Add the URL of this repository and choose "Integration" as the category.
-4. Click Add and then search for "Insite Energy" to install.
-5. Restart Home Assistant.
+1. In Home Assistant, go to **Settings -> Marketplace** and connect your GitHub account if prompted (required by Marketplace for custom repositories).
+2. Add the URL of this repository as a custom repository (**Add from link** / **Custom repositories** in the three-dots menu, type **Integration**).
+3. Search for **Insite Energy** and install it (on HA 2026.11+, Marketplace opens setup directly; restart Home Assistant after updates or when installing via pre-2026.11 HACS).
+
+> On Home Assistant 2025.11–2026.10 (before HACS moved into core as Marketplace), add this repository under **HACS -> Integrations -> Custom repositories** instead.
 
 ## Configuration
 
@@ -104,8 +104,7 @@ The first reading after installing also publishes nothing: there's no previous r
 
 ## Development
 
-Requires Python 3.14 — `pytest-homeassistant-custom-component` needs it, and on 3.13 pip
-resolves back to a much older release rather than failing.
+Requires Python 3.14 — Home Assistant 2026.11+ and `pytest-homeassistant` need it.
 
 ```bash
 pip install -r requirements_test.txt

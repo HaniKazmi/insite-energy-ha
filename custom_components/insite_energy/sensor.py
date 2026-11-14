@@ -11,7 +11,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfEnergy
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -25,7 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Insite Energy sensor platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
@@ -329,7 +329,7 @@ class InsiteUtilityReadingDateSensor(InsiteUtilityEntity, SensorEntity):
         if not data:
             return None
         return parse_reading_date(
-            data.get("MeterReadingDate"), dt_util.DEFAULT_TIME_ZONE
+            data.get("MeterReadingDate"), dt_util.get_default_time_zone()
         )
 
 

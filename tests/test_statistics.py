@@ -50,7 +50,7 @@ def window_start() -> datetime:
     Derived the same way the code derives it, so these tests do not care what
     timezone the test instance happens to run in.
     """
-    return dt_util.as_utc(parse_reading_date(JULY, dt_util.DEFAULT_TIME_ZONE))
+    return dt_util.as_utc(parse_reading_date(JULY, dt_util.get_default_time_zone()))
 
 
 def payload(reading: str, date: str, rate: str = "14.67p") -> dict:
@@ -699,7 +699,7 @@ async def test_a_window_covers_the_hours_that_really_elapsed(
     with fixtures that straddle none of them.
     """
     tz = ZoneInfo("Europe/London")
-    with patch.object(dt_util, "DEFAULT_TIME_ZONE", tz):
+    with patch.object(dt_util, "get_default_time_zone", return_value=tz):
         rows = await publish(
             hass, payload("100.0", first), payload("200.0", second)
         )
@@ -717,7 +717,7 @@ async def test_a_window_covers_the_hours_that_really_elapsed(
 async def test_dst_windows_still_do_not_share_an_hour(hass):
     """The window either side of a transition must abut, not overlap."""
     tz = ZoneInfo("Europe/London")
-    with patch.object(dt_util, "DEFAULT_TIME_ZONE", tz):
+    with patch.object(dt_util, "get_default_time_zone", return_value=tz):
         before = await publish(
             hass,
             payload("100.0", "2026/10/24 00:00"),

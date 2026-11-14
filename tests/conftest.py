@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.insite_energy.const import DOMAIN
 
@@ -15,17 +15,6 @@ PASSWORD = "hunter2"
 # Stands in for the jar a verified login leaves behind, the useful part of
 # which is the cookie saying this browser has already answered a code.
 COOKIES = {"remember-browser": "verified"}
-
-
-@pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations):
-    """Let HA load the integration from custom_components/.
-
-    This pulls in `hass`, and being autouse it does so before anything a test
-    asked for by name. A test needing the real recorder has to get `recorder_mock`
-    in first, which it cannot do from here - see tests/test_statistics_recorder.py.
-    """
-    return
 
 
 @pytest.fixture

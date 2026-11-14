@@ -4,6 +4,10 @@
   "after_dependencies": [
     "recorder"
   ],
+  "categories": [
+    "energy.meters_monitoring",
+    "energy.energy_prices"
+  ],
   "codeowners": [
     "@HaniKazmi"
   ],
@@ -15,5 +19,5 @@
   "issue_tracker": "https://github.com/HaniKazmi/insite-energy-ha/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "1.4.0"
+  "version": "1.5.1"
 }

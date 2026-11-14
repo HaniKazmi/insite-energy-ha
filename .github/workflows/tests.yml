@@ -27,9 +27,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # pytest-homeassistant-custom-component requires >= 3.14. On 3.13 pip
-          # resolves to an old release rather than failing, which pins the whole
-          # suite to a Home Assistant six months behind.
+          # Home Assistant 2026.11+ and pytest-homeassistant require >= 3.14.
           python-version: "3.14"
           cache: pip
           # The deps live in requirements_test.txt, which the default glob
@@ -71,6 +69,21 @@ jobs:
         # would bury real changes in whitespace.
         run: ruff check --output-format=github .
 
+      - name: Check tag matches manifest version
+        # Marketplace tracks updates by Git tag while HA's loader reads
+        # manifest.json; if they drift, installed versions mismatch releases.
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python -c '
+          import json, os, pathlib, sys
+          version = json.loads(pathlib.Path("custom_components/insite_energy/manifest.json").read_text())["version"]
+          tag = os.environ["TAG"]
+          if tag != version:
+              sys.exit(f"Git tag {tag!r} does not match manifest.json version {version!r}")
+          '
+
   latest:
     # Early warning that a new Home Assistant breaks us, without letting it
     # fail a PR that changed nothing relevant.
@@ -89,10 +102,10 @@ jobs:
       - name: Install the newest release
         run: |
           python -m pip install --upgrade pip
-          pip install pytest-homeassistant-custom-component pytest-cov
+          pip install pytest-homeassistant pytest-cov
 
       - name: Report the versions under test
-        run: pip show homeassistant pytest-homeassistant-custom-component | grep -E '^(Name|Version)'
+        run: pip show homeassistant pytest-homeassistant | grep -E '^(Name|Version)'
 
       - name: Run tests
         run: pytest

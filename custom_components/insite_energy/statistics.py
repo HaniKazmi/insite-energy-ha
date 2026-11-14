@@ -379,7 +379,7 @@ async def _async_publish_one(
     weight_source: str | None,
 ) -> None:
     """Spread one utility's new reading across the period it covers."""
-    tz = dt_util.DEFAULT_TIME_ZONE
+    tz = dt_util.get_default_time_zone()
     name = str(current.get("Name") or key)
 
     try:

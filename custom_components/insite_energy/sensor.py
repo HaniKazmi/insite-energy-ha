@@ -11,11 +11,12 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfEnergy
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, LAST_POLL_KEY
+from .const import BASE_URL, DOMAIN, LAST_POLL_KEY
 from .coordinator import InsiteEnergyDataUpdateCoordinator
 from .util import parse_pence, parse_reading_date, utility_key
 
@@ -107,6 +108,8 @@ class InsiteAccountEntity(InsiteEnergyBaseEntity):
             "identifiers": {(DOMAIN, f"{self._base_id}_account")},
             "name": "Account Details",
             "manufacturer": "Insite Energy",
+            "entry_type": DeviceEntryType.SERVICE,
+            "configuration_url": BASE_URL,
         }
 
 

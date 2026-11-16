@@ -76,6 +76,26 @@ async def test_no_unique_id_contains_the_email(hass, config_entry, mock_client):
             assert USERNAME not in identifier
 
 
+async def test_account_is_a_service_and_utilities_are_devices(
+    hass, config_entry, mock_client
+):
+    """Account Details is a logical service; the utility meters are hardware."""
+    await setup_entry(hass, config_entry)
+
+    device_reg = dr.async_get(hass)
+    by_id = {
+        next(iter(d.identifiers))[1]: d
+        for d in dr.async_entries_for_config_entry(device_reg, config_entry.entry_id)
+    }
+
+    account = by_id[f"{config_entry.entry_id}_account"]
+    assert account.entry_type is dr.DeviceEntryType.SERVICE
+    assert account.configuration_url == "https://my.insite-energy.co.uk"
+
+    assert by_id[f"{config_entry.entry_id}_co"].entry_type is None
+    assert by_id[f"{config_entry.entry_id}_hh"].entry_type is None
+
+
 async def test_reload_keeps_identifiers_stable(hass, config_entry, mock_client):
     """Reloading must adopt the existing entities rather than duplicate them."""
     await setup_entry(hass, config_entry)

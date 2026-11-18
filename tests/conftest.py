@@ -48,6 +48,39 @@ def view_model() -> dict:
 
 
 @pytest.fixture
+def prepay_view_model() -> dict:
+    """The shape of a prepay ("top-up") account's payload, trimmed.
+
+    Unlike a credit account, CreditAccountBalance is null and the credit is
+    held per utility as ActiveBalance. Reading dates come day first, and a
+    meter whose readings the portal has not received carries none at all.
+    """
+    return {
+        "NAME": "Test User",
+        "Email": USERNAME,
+        "AccountType": "Prepay",
+        "CreditAccountBalance": None,
+        "DisplayCreditAccountBalance": None,
+        "UtilityDetails": [
+            {
+                "Name": "Heating & Hot Water",
+                "ShortName": "HH",
+                "ProductType": "Guru",
+                "ActiveBalance": "66.27",
+                "DisplayActiveBalance": "£66.27",
+                "DebtBalance": "0.0000",
+                "DisplayDebtBalance": "£0.00",
+                "MeterReadingDate": "27/10/2026 02:53",
+                "MeterSerialNumber": None,
+                "LastMeterReading": None,
+                "Rates": "25.01p",
+                "StandingChargeValue": "35.36p",
+            },
+        ],
+    }
+
+
+@pytest.fixture
 def config_entry() -> MockConfigEntry:
     """A configured entry."""
     return MockConfigEntry(

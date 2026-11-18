@@ -18,7 +18,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import BASE_URL, DOMAIN, LAST_POLL_KEY
 from .coordinator import InsiteEnergyDataUpdateCoordinator
-from .util import parse_pence, parse_reading_date, utility_key
+from .util import parse_pence, parse_reading_date, prepay_balance, utility_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -191,7 +191,11 @@ class InsiteAccountBalanceSensor(InsiteAccountEntity, SensorEntity):
                 try:
                     return float(balance_str)
                 except (ValueError, TypeError):
-                    pass
+                    return None
+            # Prepay accounts report no account-level balance at all; their
+            # credit is held per utility. Only consulted when the credit
+            # balance is absent, so a credit account is read exactly as before.
+            return prepay_balance(self.coordinator.data)
         return None
 
 

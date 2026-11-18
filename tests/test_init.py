@@ -499,6 +499,57 @@ async def test_balance_keeps_its_monetary_total(hass, config_entry, mock_client)
     assert state.attributes.get("state_class") in DEFAULT_STATISTICS
 
 
+async def test_prepay_account_reports_its_balance(
+    hass, config_entry, mock_client, prepay_view_model
+):
+    """A prepay account's credit is held per utility, and the balance shows it."""
+    mock_client.async_get_data.return_value = prepay_view_model
+    await setup_entry(hass, config_entry)
+
+    assert hass.states.get("sensor.account_details_balance").state == "66.27"
+
+
+async def test_prepay_account_reports_its_reading_date(
+    hass, config_entry, mock_client, prepay_view_model
+):
+    """The day-first reading date of a prepay account is read, not dropped."""
+    await hass.config.async_set_time_zone("Europe/London")
+    mock_client.async_get_data.return_value = prepay_view_model
+    await setup_entry(hass, config_entry)
+
+    state = hass.states.get("sensor.heating_hot_water_last_reading_date")
+    # 02:53 GMT on 27 October - the clocks went back on the 25th.
+    assert state.state == "2026-10-27T02:53:00+00:00"
+    # No reading came with it, and none is invented.
+    assert hass.states.get("sensor.heating_hot_water_meter_reading").state == "unknown"
+
+
+async def test_credit_balance_wins_over_prepay_balances(
+    hass, config_entry, mock_client, prepay_view_model
+):
+    """A credit account reporting per-utility balances too is read as before."""
+    prepay_view_model["CreditAccountBalance"] = "-47.53"
+    mock_client.async_get_data.return_value = prepay_view_model
+    await setup_entry(hass, config_entry)
+
+    assert hass.states.get("sensor.account_details_balance").state == "-47.53"
+
+
+async def test_unreadable_credit_balance_is_not_replaced(
+    hass, config_entry, mock_client, prepay_view_model
+):
+    """A credit balance the portal sent but we can't read stays unknown.
+
+    Falling back to the per-utility figures would show a different number
+    under the same name; only a balance the portal left out is replaced.
+    """
+    prepay_view_model["CreditAccountBalance"] = "n/a"
+    mock_client.async_get_data.return_value = prepay_view_model
+    await setup_entry(hass, config_entry)
+
+    assert hass.states.get("sensor.account_details_balance").state == "unknown"
+
+
 async def test_no_invalid_state_class_warnings(hass, config_entry, mock_client, caplog):
     """Every device_class/state_class pairing must be one HA considers valid."""
     await setup_entry(hass, config_entry)

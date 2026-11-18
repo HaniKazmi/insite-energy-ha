@@ -27,7 +27,7 @@ If your password stops working, Home Assistant will prompt you to re-enter it ra
 The integration automatically creates devices for your Account and each Utility Meter found on your account.
 
 ### Account Details Device
-- **Balance**: A sensor showing your current account balance in GBP, matching the portal (this can be negative).
+- **Balance**: A sensor showing your current account balance in GBP, matching the portal (this can be negative). Prepay (pay-as-you-go / top-up) accounts work too: the portal holds their credit per meter rather than on the account, so the balance is the total of the credit on each meter.
 - **Last Poll Time** (Diagnostic): A timestamp showing exactly when data was last successfully retrieved from the Insite Energy API.
 
 ### Utility Devices (e.g., Heating & Hot Water)
@@ -37,6 +37,8 @@ For each utility listed on your account, a separate device is created with the f
 - **Standing Charge**: The daily standing charge, in GBP/day, converted and recorded the same way.
 - **Last Reading Date**: A timestamp for when your meter was last read.
 - **Meter Serial Number** (Diagnostic): The serial number of the utility meter.
+
+On prepay accounts the portal may not publish meter readings at all. **Meter Reading** (and so the spread statistics) then stays unknown, while the balance, tariffs and reading date still work.
 
 **Meter Reading** is published as an increasing energy total, so it can be added to the Energy dashboard as an individual device. Note the caveat below: readings arrive in infrequent jumps rather than continuously, so consumption shows up as a spike on whichever day the portal updates.
 
